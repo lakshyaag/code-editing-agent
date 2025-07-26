@@ -10,22 +10,20 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/invopop/jsonschema"
 	"github.com/joho/godotenv"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/azure"
+	"google.golang.org/genai"
 )
 
 type ToolDefinition struct {
-	Name        string                    `json:"name"`
-	Description string                    `json:"description"`
-	InputSchema openai.FunctionParameters `json:"input_schema"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"input_schema"`
 	Function    func(input json.RawMessage) (string, error)
 }
 
 type Agent struct {
-	client         *openai.Client
+	client         *genai.Client
 	model          string
 	getUserMessage func() (string, bool)
 	tools          []ToolDefinition
@@ -205,7 +203,7 @@ func createNewFile(filePath, content string) (string, error) {
 	return fmt.Sprintf("File %s created successfully", filePath), nil
 }
 
-func NewAgent(client *openai.Client, model string, getUserMessage func() (string, bool), tools []ToolDefinition) *Agent {
+func NewAgent(client *genai.Client, model string, getUserMessage func() (string, bool), tools []ToolDefinition) *Agent {
 	return &Agent{
 		client:         client,
 		model:          model,
@@ -218,25 +216,22 @@ func main() {
 	// Try to load .env, but do not fail if missing
 	_ = godotenv.Load()
 
-	endpoint := os.Getenv("AOAI_ENDPOINT")
-	api_version := os.Getenv("AOAI_API_VERSION")
-
-	model := os.Getenv("AOAI_MODEL")
-	tenantID := os.Getenv("AZURE_TENANT_ID")
-
-	credential, err := azidentity.NewDefaultAzureCredential(&azidentity.DefaultAzureCredentialOptions{
-		TenantID: tenantID,
-	})
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
-		return
+	apiKey := os.Getenv("GOOGLE_API_KEY")
+	if apiKey == "" {
+		fmt.Fprintf(os.Stderr, "ERROR: GOOGLE_API_KEY environment variable is required\n")
+		os.Exit(1)
 	}
 
-	client := openai.NewClient(
-		azure.WithEndpoint(endpoint, api_version),
-		azure.WithTokenCredential(credential),
-	)
+	client, err := genai.NewClient(context.Background(), &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: Failed to create Gemini client: %v\n", err)
+		os.Exit(1)
+	}
+
+	model := "gemini-2.0-flash"
 
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -249,7 +244,7 @@ func main() {
 
 	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition}
 
-	agent := NewAgent(&client, model, getUserMessage, tools)
+	agent := NewAgent(client, model, getUserMessage, tools)
 
 	err = agent.Run(context.TODO())
 
@@ -260,7 +255,7 @@ func main() {
 }
 
 func (a *Agent) Run(ctx context.Context) error {
-	conversation := []openai.ChatCompletionMessageParamUnion{}
+	conversation := []*genai.Content{}
 
 	fmt.Printf("Chat with CLI\n")
 	cwd, err := os.Getwd()
@@ -280,63 +275,110 @@ func (a *Agent) Run(ctx context.Context) error {
 				break
 			}
 
-			userMessage := openai.UserMessage(userInput)
+			userMessage := &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: userInput},
+				},
+			}
 			conversation = append(conversation, userMessage)
 		}
 
-		message, err := a.runInference(ctx, conversation)
-
+		response, err := a.runInference(ctx, conversation)
 		if err != nil {
 			return err
 		}
 
-		aiMessage := message.Choices[0].Message
-
-		conversation = append(conversation, aiMessage.ToParam())
-
-		toolResults := []openai.ChatCompletionMessageParamUnion{}
-		if len(aiMessage.ToolCalls) > 0 {
-			for _, toolCall := range aiMessage.ToolCalls {
-				result := a.executeTool(toolCall.ID, toolCall.Function.Name, json.RawMessage([]byte(toolCall.Function.Arguments)))
-
-				toolResults = append(toolResults, result)
-			}
-		} else if len(aiMessage.ToolCalls) == 0 {
-			fmt.Printf("\u001b[94mCodeAgent\u001b[0m: %s\n", aiMessage.Content)
-			readUserInput = true
-			continue
+		if len(response.Candidates) == 0 {
+			return fmt.Errorf("no response candidates from Gemini")
 		}
 
-		readUserInput = false
-		conversation = append(conversation, toolResults...)
+		candidate := response.Candidates[0]
+
+		// Add AI response to conversation
+		aiContent := &genai.Content{
+			Role:  "model",
+			Parts: candidate.Content.Parts,
+		}
+		conversation = append(conversation, aiContent)
+
+		// Check for function calls
+		if len(candidate.Content.Parts) > 0 {
+			hasToolCalls := false
+			var toolResults []*genai.Part
+
+			for _, part := range candidate.Content.Parts {
+				if part.FunctionCall != nil {
+					hasToolCalls = true
+					result := a.executeTool(part.FunctionCall.Name, part.FunctionCall.Args)
+					toolResults = append(toolResults, &genai.Part{
+						FunctionResponse: &genai.FunctionResponse{
+							Name:     part.FunctionCall.Name,
+							Response: map[string]interface{}{"result": result},
+						},
+					})
+				}
+			}
+
+			if hasToolCalls {
+				// Add tool results to conversation
+				toolContent := &genai.Content{
+					Role:  "user",
+					Parts: toolResults,
+				}
+				conversation = append(conversation, toolContent)
+				readUserInput = false
+				continue
+			}
+		}
+
+		// Display text response
+		for _, part := range candidate.Content.Parts {
+			if part.Text != "" {
+				fmt.Printf("\u001b[94mCodeAgent\u001b[0m: %s\n", part.Text)
+			}
+		}
+		readUserInput = true
 	}
 	return nil
 }
 
-func (a *Agent) runInference(ctx context.Context, conversation []openai.ChatCompletionMessageParamUnion) (*openai.ChatCompletion, error) {
-
-	openaiTools := []openai.ChatCompletionToolParam{}
+func (a *Agent) runInference(ctx context.Context, conversation []*genai.Content) (*genai.GenerateContentResponse, error) {
+	// Convert tool definitions to Gemini function declarations
+	var functions []*genai.FunctionDeclaration
 	for _, tool := range a.tools {
-		openaiTools = append(openaiTools, openai.ChatCompletionToolParam{
-			Function: openai.FunctionDefinitionParam{
-				Name:        tool.Name,
-				Description: openai.String(tool.Description),
-				Parameters:  tool.InputSchema,
-			},
+		// Convert map[string]interface{} to genai.Schema
+		schemaBytes, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal schema: %v", err)
+		}
+
+		var schema genai.Schema
+		if err := json.Unmarshal(schemaBytes, &schema); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal schema: %v", err)
+		}
+
+		functions = append(functions, &genai.FunctionDeclaration{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  &schema,
 		})
 	}
 
-	message, err := a.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Messages:  conversation,
-		Model:     openai.ChatModel(a.model),
-		MaxTokens: openai.Int(1024),
-		Tools:     openaiTools,
-	})
+	// Configure the generation with tools
+	config := &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{
+			{
+				FunctionDeclarations: functions,
+			},
+		},
+		MaxOutputTokens: 1024,
+	}
 
-	return message, err
+	return a.client.Models.GenerateContent(ctx, a.model, conversation, config)
 }
 
-func (a *Agent) executeTool(id, name string, input json.RawMessage) openai.ChatCompletionMessageParamUnion {
+func (a *Agent) executeTool(name string, args map[string]interface{}) string {
 	var toolDef ToolDefinition
 	var found bool
 
@@ -348,21 +390,27 @@ func (a *Agent) executeTool(id, name string, input json.RawMessage) openai.ChatC
 		}
 	}
 	if !found {
-		return openai.ToolMessage(fmt.Sprintf("Tool %s not found", name), id)
+		return fmt.Sprintf("Tool %s not found", name)
 	}
 
-	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, input)
-
-	result, err := toolDef.Function(input)
+	// Convert args to JSON
+	argsJSON, err := json.Marshal(args)
 	if err != nil {
-		return openai.ToolMessage(fmt.Sprintf("Error executing tool %s: %v", name, err), id)
+		return fmt.Sprintf("Error marshaling arguments: %v", err)
+	}
+
+	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, string(argsJSON))
+
+	result, err := toolDef.Function(argsJSON)
+	if err != nil {
+		result = fmt.Sprintf("Error executing tool %s: %v", name, err)
 	}
 
 	fmt.Printf("\u001b[92mresult\u001b[0m: %s\n", result)
-	return openai.ToolMessage(result, id)
+	return result
 }
 
-func GenerateSchema[T any]() openai.FunctionParameters {
+func GenerateSchema[T any]() map[string]interface{} {
 	reflector := jsonschema.Reflector{
 		AllowAdditionalProperties: true,
 		DoNotReference:            true,
@@ -377,9 +425,9 @@ func GenerateSchema[T any]() openai.FunctionParameters {
 		panic(fmt.Sprintf("failed to marshal schema: %v", err))
 	}
 
-	var params openai.FunctionParameters
+	var params map[string]interface{}
 	if err := json.Unmarshal(schemaBytes, &params); err != nil {
-		panic(fmt.Sprintf("failed to unmarshal schema to FunctionParameters: %v", err))
+		panic(fmt.Sprintf("failed to unmarshal schema to map: %v", err))
 	}
 	return params
 }
