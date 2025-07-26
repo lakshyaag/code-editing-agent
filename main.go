@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -86,36 +85,52 @@ func ListFiles(input json.RawMessage) (string, error) {
 		dir = listFilesInput.Path
 	}
 
-	var files []string
-	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
+	type FileNode struct {
+		Name     string     `json:"name"`
+		IsDir    bool       `json:"is_dir"`
+		Children []FileNode `json:"children,omitempty"`
+	}
 
-		relPath, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
+	var buildTree func(string, int) ([]FileNode, error)
+	buildTree = func(currentPath string, depth int) ([]FileNode, error) {
+		if depth > 3 {
+			return nil, nil
 		}
-
-		if relPath != "." {
-			if info.IsDir() {
-				files = append(files, relPath+"/")
-			} else {
-				files = append(files, relPath)
+		entries, err := os.ReadDir(currentPath)
+		if err != nil {
+			return nil, err
+		}
+		var nodes []FileNode
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") {
+				continue // skip hidden files/dirs
 			}
+			fullPath := filepath.Join(currentPath, name)
+			node := FileNode{
+				Name:  name,
+				IsDir: entry.IsDir(),
+			}
+			if entry.IsDir() && depth < 3 {
+				children, err := buildTree(fullPath, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				node.Children = children
+			}
+			nodes = append(nodes, node)
 		}
-		return nil
-	})
+		return nodes, nil
+	}
 
+	tree, err := buildTree(dir, 1)
 	if err != nil {
 		return "", err
 	}
-
-	result, err := json.Marshal(files)
+	result, err := json.Marshal(tree)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal file list: %w", err)
+		return "", fmt.Errorf("failed to marshal file tree: %w", err)
 	}
-
 	return string(result), nil
 }
 
@@ -200,10 +215,8 @@ func NewAgent(client *openai.Client, model string, getUserMessage func() (string
 }
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
+	// Try to load .env, but do not fail if missing
+	_ = godotenv.Load()
 
 	endpoint := os.Getenv("AOAI_ENDPOINT")
 	api_version := os.Getenv("AOAI_API_VERSION")
@@ -250,6 +263,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	conversation := []openai.ChatCompletionMessageParamUnion{}
 
 	fmt.Printf("Chat with CLI\n")
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get current working directory: %v\n", err)
+	} else {
+		fmt.Printf("Current working directory: %s\n", cwd)
+	}
 
 	readUserInput := true
 	for {
