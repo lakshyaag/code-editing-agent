@@ -1,5 +1,70 @@
 # Agent Development Log
 
+## 2025-01-28: Tool Confirmation - Human-in-the-Loop for Tool Execution
+
+### 🔐 IMPLEMENTED: Tool execution now requires user confirmation
+
+**Feature Request**: Add confirmation prompts before executing tools, allowing users to approve or deny tool calls made by the LLM.
+
+**Implementation Details**:
+
+#### 1. Human-in-the-Loop Architecture
+**Pattern**: Following the human-in-the-loop pattern used in LangChain and other LLM frameworks, tools now pause for user confirmation before execution.
+
+**Key Components**:
+- **ToolConfirmationCallback**: New callback type in agent for getting user approval
+- **Confirmation UI**: Modal overlay displaying tool details and waiting for Y/N response
+- **Preference System**: Toggle to enable/disable confirmation (F3 key)
+- **Real-time Flow**: Confirmation happens during streaming, not blocking the entire response
+
+#### 2. Technical Implementation
+
+**Agent Changes**:
+- Added `ToolConfirmationCallback` type: `func(toolName string, args map[string]interface{}) (bool, error)`
+- Updated `ProcessMessage` to accept confirmation callback
+- Tool rejection sends error response back to LLM for handling
+- Maintains conversation flow even when tools are rejected
+
+**TUI Changes**:
+- Added confirmation modal with red border for attention
+- Shows tool name and formatted arguments
+- Y to confirm, N/Esc to deny execution
+- Non-blocking implementation using channels
+- Status bar shows current confirmation state
+
+**Preferences**:
+- New `RequireToolConfirmation` field (defaults to true for safety)
+- Persisted to `~/.code-agent/config.json`
+- F3 key toggles confirmation on/off
+- Visual feedback when toggling
+
+#### 3. User Experience
+
+**Confirmation Flow**:
+1. LLM decides to call a tool
+2. **Confirmation modal appears** with tool details
+3. User presses Y to approve or N/Esc to deny
+4. If approved: Tool executes normally
+5. If denied: Tool shows as rejected, LLM continues with error
+
+**Visual Design**:
+- Red double border for high visibility
+- Clear tool name and arguments display
+- JSON formatting for complex arguments
+- Help text in status bar changes during confirmation
+
+**Safety Features**:
+- Defaults to requiring confirmation for new users
+- Rejection message sent back to LLM
+- Tool calls marked as errors when rejected
+- Full audit trail in conversation history
+
+**Result**: Users now have complete control over tool execution, preventing unwanted file modifications or system commands. The feature can be toggled on/off based on trust level and use case.
+
+**Build Status**: ✅ Compiles successfully, `go vet` passes
+
+---
+
 ## 2025-01-27: System Prompt Loading & Glob Tool Addition
 
 ### 📦 IMPLEMENTED: Embedded System Prompt and File Globbing Tool

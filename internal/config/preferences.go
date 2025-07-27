@@ -9,7 +9,8 @@ import (
 
 // UserPreferences stores user-specific settings
 type UserPreferences struct {
-	SelectedModel string `json:"selected_model,omitempty"`
+	SelectedModel           string `json:"selected_model,omitempty"`
+	RequireToolConfirmation bool   `json:"require_tool_confirmation"`
 }
 
 // GetPreferencesPath returns the path to the preferences file
@@ -32,7 +33,9 @@ func LoadPreferences() (*UserPreferences, error) {
 
 	// If file doesn't exist, return default preferences
 	if _, err := os.Stat(prefsPath); os.IsNotExist(err) {
-		return &UserPreferences{}, nil
+		return &UserPreferences{
+			RequireToolConfirmation: true, // Default to true for safety
+		}, nil
 	}
 
 	data, err := os.ReadFile(prefsPath)
@@ -43,6 +46,12 @@ func LoadPreferences() (*UserPreferences, error) {
 	var prefs UserPreferences
 	if err := json.Unmarshal(data, &prefs); err != nil {
 		return nil, fmt.Errorf("failed to parse preferences: %w", err)
+	}
+
+	// Set default values for fields that weren't in the config
+	if prefs.RequireToolConfirmation == false && prefs.SelectedModel == "" {
+		// If the config file exists but doesn't have this field, default to true
+		prefs.RequireToolConfirmation = true
 	}
 
 	return &prefs, nil

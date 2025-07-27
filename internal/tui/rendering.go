@@ -270,16 +270,28 @@ func (m *model) statusBarView() string {
 	tokenInfo := tokenStyle.Render(fmt.Sprintf("🪙 %s: %d in / %d out",
 		tokenDescription, tokenUsage.InputTokens, tokenUsage.OutputTokens))
 
-	// Help text - context sensitive
+	// Add help text
+	confirmStatus := ""
+	if m.requireToolConfirmation {
+		confirmStatus = " (Confirm: ON)"
+	} else {
+		confirmStatus = " (Confirm: OFF)"
+	}
+
 	var helpInfo string
-	if m.modelSelectionMode {
+	if m.toolConfirmationMode {
+		helpInfo = lipgloss.NewStyle().
+			Foreground(warningColor).
+			Bold(true).
+			Render("Y: Confirm | N/Esc: Deny")
+	} else if m.modelSelectionMode {
 		helpInfo = lipgloss.NewStyle().
 			Foreground(primaryColor).
 			Render("↑↓ Navigate • Enter Select • Esc Cancel")
 	} else {
 		helpInfo = lipgloss.NewStyle().
 			Foreground(textMuted).
-			Render("F2 Model • Ctrl+T Toggle • Ctrl+C Exit")
+			Render(fmt.Sprintf("F2 Model • F3 Tool Confirm%s • Ctrl+T Toggle • Ctrl+C Exit", confirmStatus))
 	}
 
 	// Combine all status items

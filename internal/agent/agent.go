@@ -36,6 +36,10 @@ type (
 
 	// ThoughtMessageCallback is called when a thought message is ready to display
 	ThoughtMessageCallback func(msg Message) error
+
+	// ToolConfirmationCallback is called to get user confirmation before executing a tool
+	// Returns true if the tool should be executed, false if it should be skipped
+	ToolConfirmationCallback func(toolName string, args map[string]interface{}) (bool, error)
 )
 
 const (
@@ -105,7 +109,7 @@ func (a *Agent) precomputeFunctionDeclarations() error {
 }
 
 // ProcessMessage handles a single user message and streams the agent's response
-func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback, thoughtCallback ThoughtMessageCallback) ([]Message, error) {
+func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback, thoughtCallback ThoughtMessageCallback, confirmationCallback ToolConfirmationCallback) ([]Message, error) {
 	messages := []Message{}
 	userMessageContent := &genai.Content{
 		Role: "user",
@@ -165,6 +169,42 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 					callKey := fmt.Sprintf("%s:%v", part.FunctionCall.Name, part.FunctionCall.Args)
 					if !processedToolCalls[callKey] {
 						processedToolCalls[callKey] = true
+
+						// Get user confirmation if callback is provided
+						if confirmationCallback != nil {
+							confirmed, err := confirmationCallback(part.FunctionCall.Name, part.FunctionCall.Args)
+							if err != nil {
+								return messages, fmt.Errorf("confirmation error: %w", err)
+							}
+							if !confirmed {
+								// User rejected the tool call
+								argsJSON, _ := json.Marshal(part.FunctionCall.Args)
+								toolCallInfo := fmt.Sprintf("🚫 Tool Call Rejected: %s\nArguments: %s\nReason: User denied execution",
+									part.FunctionCall.Name, string(argsJSON))
+
+								toolMsg := Message{
+									Type:    ToolMessage,
+									Content: toolCallInfo,
+									IsError: true,
+								}
+
+								messages = append(messages, toolMsg)
+
+								// Send tool message immediately via callback
+								if toolCallback != nil {
+									toolCallback(toolMsg)
+								}
+
+								// Prepare rejection response for conversation
+								toolResults = append(toolResults, &genai.Part{
+									FunctionResponse: &genai.FunctionResponse{
+										Name:     part.FunctionCall.Name,
+										Response: map[string]interface{}{"error": "User denied tool execution"},
+									},
+								})
+								continue
+							}
+						}
 
 						// Execute tool and create message
 						result, isError := a.executeTool(part.FunctionCall.Name, part.FunctionCall.Args)

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -51,6 +52,13 @@ type streamCompleteMsg struct {
 	finalMessages []agent.Message
 }
 
+// A message for tool confirmation request
+type toolConfirmationRequestMsg struct {
+	toolName string
+	args     map[string]interface{}
+	response chan bool
+}
+
 type model struct {
 	viewport          viewport.Model
 	textarea          textarea.Model
@@ -77,6 +85,13 @@ type model struct {
 	availableModels    []string
 	// Track if streaming was interrupted by tools
 	streamingWasInterrupted bool
+	// Tool confirmation state
+	toolConfirmationMode     bool
+	toolConfirmationName     string
+	toolConfirmationArgs     map[string]interface{}
+	toolConfirmationChan     chan toolConfirmationRequestMsg
+	confirmationResponseChan chan bool
+	requireToolConfirmation  bool // User preference for tool confirmation
 }
 
 func InitialModel(agent *agent.Agent) *model {
@@ -126,6 +141,13 @@ func InitialModel(agent *agent.Agent) *model {
 		}
 	}
 
+	// Load user preferences
+	prefs, _ := config.LoadPreferences()
+	requireConfirmation := true // Default to true
+	if prefs != nil {
+		requireConfirmation = prefs.RequireToolConfirmation
+	}
+
 	m := &model{
 		textarea:    ta,
 		viewport:    vp,
@@ -135,20 +157,24 @@ func InitialModel(agent *agent.Agent) *model {
 		messages: []message{
 			{mType: welcomeMessage, content: fmt.Sprintf(config.WelcomeMessage, len(config.SystemPrompt))},
 		},
-		showStatusBar:           true,
-		clickableLines:          make(map[int]int),
-		streamingMsgIndex:       -1, // Initialize to -1 (no streaming message)
-		streamChunkChan:         make(chan streamChunkMsg, 100),
-		toolMessageChan:         make(chan toolMessageMsg, 10),
-		thoughtMessageChan:      make(chan thoughtMessageMsg, 10),
-		streamCompleteChan:      make(chan streamCompleteMsg, 1),
-		markdownRenderer:        markdownRenderer,
-		modelSelectionMode:      false,
-		selectedModelIndex:      currentModelIndex,
-		availableModels:         availableModels,
-		streamingWasInterrupted: false,
-		width:                   80, // Set initial width
-		height:                  24, // Set initial height
+		showStatusBar:            true,
+		clickableLines:           make(map[int]int),
+		streamingMsgIndex:        -1, // Initialize to -1 (no streaming message)
+		streamChunkChan:          make(chan streamChunkMsg, 100),
+		toolMessageChan:          make(chan toolMessageMsg, 10),
+		thoughtMessageChan:       make(chan thoughtMessageMsg, 10),
+		streamCompleteChan:       make(chan streamCompleteMsg, 1),
+		markdownRenderer:         markdownRenderer,
+		modelSelectionMode:       false,
+		selectedModelIndex:       currentModelIndex,
+		availableModels:          availableModels,
+		streamingWasInterrupted:  false,
+		width:                    80, // Set initial width
+		height:                   24, // Set initial height
+		toolConfirmationMode:     false,
+		toolConfirmationChan:     make(chan toolConfirmationRequestMsg, 1),
+		confirmationResponseChan: make(chan bool, 1),
+		requireToolConfirmation:  requireConfirmation,
 	}
 
 	// Set initial content
@@ -211,6 +237,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.KeyMsg:
+		// Tool confirmation mode has highest priority
+		if m.toolConfirmationMode {
+			switch msg.String() {
+			case "y", "Y":
+				// User confirmed
+				m.confirmationResponseChan <- true
+				m.toolConfirmationMode = false
+				m.textarea.Focus()
+				return m, nil
+			case "n", "N", "esc":
+				// User denied
+				m.confirmationResponseChan <- false
+				m.toolConfirmationMode = false
+				m.textarea.Focus()
+				return m, nil
+			}
+			return m, nil
+		}
+
 		// Model selection mode has priority
 		if m.modelSelectionMode {
 			switch msg.Type {
@@ -272,6 +317,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textarea.Focus()
 			}
 			return m, nil
+		case tea.KeyF3:
+			// Toggle tool confirmation requirement
+			m.requireToolConfirmation = !m.requireToolConfirmation
+
+			// Save preference
+			prefs, _ := config.LoadPreferences()
+			if prefs == nil {
+				prefs = &config.UserPreferences{}
+			}
+			prefs.RequireToolConfirmation = m.requireToolConfirmation
+			config.SavePreferences(prefs)
+
+			// Show feedback message
+			confirmStatus := "enabled"
+			if !m.requireToolConfirmation {
+				confirmStatus = "disabled"
+			}
+			m.messages = append(m.messages, message{
+				mType:   agentMessage,
+				content: fmt.Sprintf("Tool confirmation %s", confirmStatus),
+			})
+			m.viewport.SetContent(m.renderConversation())
+			m.viewport.GotoBottom()
+			return m, nil
 		case tea.KeyCtrlT:
 			// Unify the state of all tool and thought messages
 			var anyExpanded bool
@@ -313,8 +382,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamStartMsg:
 		// Start the real-time streaming process
 		go func() {
+			// Create context for this streaming session
+			ctx := context.Background()
 			// Call the agent's ProcessMessage for streaming with tool callback
-			response, err := m.agent.ProcessMessage(context.Background(), msg.userInput,
+			response, err := m.agent.ProcessMessage(ctx, msg.userInput,
 				// Text callback for streaming chunks
 				func(chunk string) error {
 					select {
@@ -341,6 +412,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Channel full, skip to avoid blocking
 					}
 					return nil
+				},
+				// Tool confirmation callback
+				func(toolName string, args map[string]interface{}) (bool, error) {
+					// If confirmation is not required, auto-approve
+					if !m.requireToolConfirmation {
+						return true, nil
+					}
+
+					// Create a response channel
+					responseChan := make(chan bool, 1)
+
+					// Send confirmation request to the UI
+					m.toolConfirmationChan <- toolConfirmationRequestMsg{
+						toolName: toolName,
+						args:     args,
+						response: responseChan,
+					}
+
+					// Wait for user response
+					select {
+					case confirmed := <-responseChan:
+						return confirmed, nil
+					case <-ctx.Done():
+						return false, ctx.Err()
+					}
 				})
 
 			if err != nil {
@@ -362,6 +458,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			waitForToolMessage(m.toolMessageChan),
 			waitForThoughtMessage(m.thoughtMessageChan),
 			waitForStreamComplete(m.streamCompleteChan),
+			waitForToolConfirmation(m.toolConfirmationChan),
 		)
 	case toolMessageMsg:
 		// Handle tool message immediately
@@ -480,6 +577,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderConversation())
 		m.viewport.GotoBottom()
 		return m, nil
+	case toolConfirmationRequestMsg:
+		// Handle tool confirmation request
+		m.toolConfirmationMode = true
+		m.toolConfirmationName = msg.toolName
+		m.toolConfirmationArgs = msg.args
+		m.confirmationResponseChan = msg.response
+		m.textarea.Blur()
+		// Continue listening for more confirmation requests
+		return m, waitForToolConfirmation(m.toolConfirmationChan)
 	case error:
 		m.err = msg
 		return m, nil
@@ -493,6 +599,20 @@ func (m *model) View() string {
 		return fmt.Sprintf("Error: %v", m.err)
 	}
 
+	// Tool confirmation overlay takes priority
+	if m.toolConfirmationMode {
+		return m.renderToolConfirmation(m.renderMainView())
+	}
+
+	// Model selector overlay
+	if m.modelSelectionMode {
+		return m.renderModelSelector(m.renderMainView())
+	}
+
+	return m.renderMainView()
+}
+
+func (m *model) renderMainView() string {
 	var taView string
 	if m.showSpinner {
 		// Create a centered spinner with modern styling
@@ -512,19 +632,12 @@ func (m *model) View() string {
 			Render(m.textarea.View())
 	}
 
-	mainView := lipgloss.JoinVertical(
+	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		m.viewport.View(),
 		taView,
 		m.statusBarView(),
 	)
-
-	// Overlay model selector if in model selection mode
-	if m.modelSelectionMode {
-		return m.renderModelSelector(mainView)
-	}
-
-	return mainView
 }
 
 func Start(agent *agent.Agent) {
@@ -566,6 +679,13 @@ func waitForStreamComplete(ch <-chan streamCompleteMsg) tea.Cmd {
 
 // waitForThoughtMessage creates a command that waits for the next thought message
 func waitForThoughtMessage(ch <-chan thoughtMessageMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
+}
+
+// waitForToolConfirmation creates a command that waits for tool confirmation requests
+func waitForToolConfirmation(ch <-chan toolConfirmationRequestMsg) tea.Cmd {
 	return func() tea.Msg {
 		return <-ch
 	}
@@ -645,5 +765,132 @@ func (m *model) renderModelSelector(background string) string {
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		selectorBox,
+	)
+}
+
+// renderToolConfirmation renders the tool confirmation overlay
+func (m *model) renderToolConfirmation(background string) string {
+	// Create the confirmation box with modern styling
+	confirmStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(warningColor).
+		Padding(2, 3).
+		Background(bgMedium)
+
+	// Title with warning icon
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(warningColor).
+		Align(lipgloss.Center).
+		MarginBottom(2)
+
+	title := titleStyle.Render("⚠️  Tool Execution Request")
+
+	// Tool name section
+	toolNameStyle := lipgloss.NewStyle().
+		Foreground(primaryColor).
+		Bold(true).
+		MarginBottom(1)
+
+	toolNameSection := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		lipgloss.NewStyle().Foreground(textMuted).Render("Tool: "),
+		toolNameStyle.Render(m.toolConfirmationName),
+	)
+
+	// Arguments section with syntax highlighting
+	argsHeaderStyle := lipgloss.NewStyle().
+		Foreground(textMuted).
+		MarginTop(1).
+		MarginBottom(1)
+
+	argsHeader := argsHeaderStyle.Render("Arguments:")
+
+	// Format arguments with proper indentation and coloring
+	argsJSON, _ := json.MarshalIndent(m.toolConfirmationArgs, "", "  ")
+	argsStyle := lipgloss.NewStyle().
+		Foreground(secondaryColor).
+		Background(bgDark).
+		Padding(1).
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(bgLighter)
+
+	argsContent := argsStyle.Render(string(argsJSON))
+
+	// Question section
+	questionStyle := lipgloss.NewStyle().
+		Foreground(textPrimary).
+		Bold(true).
+		MarginTop(2).
+		MarginBottom(2).
+		Align(lipgloss.Center)
+
+	question := questionStyle.Render("Do you want to execute this tool?")
+
+	// Action buttons visualization
+	buttonStyle := lipgloss.NewStyle().
+		Padding(0, 2).
+		MarginRight(2)
+
+	yesButton := buttonStyle.Copy().
+		Background(accentColor).
+		Foreground(bgDark).
+		Bold(true).
+		Render("Y - Yes")
+
+	noButton := buttonStyle.Copy().
+		Background(errorColor).
+		Foreground(textPrimary).
+		Bold(true).
+		Render("N - No")
+
+	escButton := buttonStyle.Copy().
+		Background(bgLighter).
+		Foreground(textPrimary).
+		Render("Esc - Cancel")
+
+	buttons := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		yesButton,
+		noButton,
+		escButton,
+	)
+
+	buttonsContainer := lipgloss.NewStyle().
+		Align(lipgloss.Center).
+		Width(50). // Fixed width for centering
+		Render(buttons)
+
+	// Security note
+	securityNote := lipgloss.NewStyle().
+		Foreground(textMuted).
+		Italic(true).
+		MarginTop(2).
+		Align(lipgloss.Center).
+		Render("🔒 Tool execution requires your permission")
+
+	// Combine all elements
+	content := lipgloss.JoinVertical(
+		lipgloss.Center,
+		title,
+		toolNameSection,
+		argsHeader,
+		argsContent,
+		question,
+		buttonsContainer,
+		securityNote,
+	)
+
+	// Apply confirmation box styling
+	confirmBox := confirmStyle.
+		Width(60). // Fixed width for consistency
+		Render(content)
+
+	// Create semi-transparent overlay effect
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		confirmBox,
+		lipgloss.WithWhitespaceBackground(bgDark),
 	)
 }
