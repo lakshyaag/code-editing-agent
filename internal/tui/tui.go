@@ -571,6 +571,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case agent.ToolMessage:
 				// Skip - these were already processed via callback
 				continue
+			case agent.AgentMessage:
+				// Only process agent messages if they are errors
+				// Normal agent messages were already displayed via streaming
+				if agentMsg.IsError {
+					newMsg := message{
+						mType:   agentMessage,
+						content: agentMsg.Content,
+						isError: agentMsg.IsError,
+					}
+					m.messages = append(m.messages, newMsg)
+				}
 			}
 		}
 
