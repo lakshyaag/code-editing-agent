@@ -1,5 +1,69 @@
 # Agent Development Log
 
+## 2025-01-03: Tool Message Override Fix + UI Cleanup
+
+### 🎯 FIXED: Tool messages no longer get overridden by streaming placeholder
+
+**Issue**: Tool messages were appearing briefly but then getting visually overridden when the streaming message placeholder was created.
+
+**Root Cause**: The streaming message placeholder was being created immediately when user pressed Enter, before knowing if there would be tool calls. This caused:
+1. Streaming placeholder appears at end of message list
+2. Tool messages get added after it
+3. Visual ordering gets confusing as streaming updates
+
+**Solution - Lazy Streaming Message Creation**:
+1. **Removed Early Placeholder**: Don't create streaming message until we actually receive text chunks
+2. **Tool Messages First**: Tool messages now appear cleanly before any streaming text
+3. **Proper Order**: Tool calls → streaming text, exactly as intended
+
+**UI Cleanup**:
+- **Removed "(streaming)" indicator**: Cleaner UI without redundant streaming labels
+- **Simplified spinner text**: "Agent is thinking..." instead of "Agent is thinking and will stream response..."
+- **Removed unused streamingStyle**: Cleaned up code by removing unused styling
+
+**Technical Changes**:
+- **TUI**: Moved streaming message creation from `tea.KeyEnter` to first `streamChunkMsg`
+- **Ordering**: Tool messages appear first, then streaming message gets created when text starts
+- **Cleanup**: Removed streaming indicators and simplified text
+
+**Result**: Perfect flow where tool calls appear immediately and cleanly, followed by streaming response text. No more visual override issues.
+
+**Build Status**: ✅ Compiles successfully, `go vet` passes
+
+---
+
+## 2025-01-03: Tool Message Timing Fix - Real-time Tool Display
+
+### 🎯 MAJOR ENHANCEMENT: Tool calls now appear immediately before streaming begins!
+
+**Issue**: Tool messages were appearing at the end after streaming completed instead of before the AI's final response.
+
+**User's Desired Flow**:
+1. User sends message
+2. Agent calls tool → **Tool message appears immediately**
+3. Tool executes and returns to agent
+4. Agent starts providing final answer (streaming text)
+
+**Root Cause**: Tool messages were being collected during streaming but only displayed after completion via the `streamCompleteMsg` handler.
+
+**Solution - Real-time Tool Message Callbacks**:
+1. **Added ToolMessageCallback**: New callback type in agent for immediate tool message delivery
+2. **Modified ProcessMessage**: Added `toolCallback` parameter to send tool messages immediately when processed
+3. **Enhanced TUI**: Added `toolMessageChan` and `toolMessageMsg` handler for real-time tool display
+4. **Callback Architecture**: Tool messages now use callback pattern like text chunks for immediate delivery
+
+**Technical Implementation**:
+- **Agent**: `ProcessMessage` now accepts both `textCallback` and `toolCallback` parameters
+- **TUI**: Added `waitForToolMessage` command and `toolMessageMsg` case handler  
+- **Channels**: New `toolMessageChan` for real-time tool message communication
+- **Flow**: Tool messages sent via callback → displayed immediately → text streaming begins
+
+**Result**: Clean separation where tool calls appear instantly when the LLM decides to use them, followed by the streamed final response. This matches the flow shown in [advanced Go LLM applications](https://blog.gopenai.com/unlocking-the-power-of-golang-for-advanced-llm-applications-a-practical-guide-2e40de2ce00d) and provides better user experience.
+
+**Build Status**: ✅ Compiles successfully, `go vet` passes
+
+---
+
 ## 2025-01-03: Implementing Streaming Messages and Token Counting
 
 ### Goals

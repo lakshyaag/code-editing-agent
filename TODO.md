@@ -6,7 +6,7 @@ This document outlines planned improvements for the Go AI agent. The tasks are d
 
 These tasks focus on making the agent more powerful, efficient, and robust.
 
--   [ ] **Implement Streaming Responses:**
+-   [x] **Implement Streaming Responses:**
     -   Modify `agent.ProcessMessage` to handle streaming responses from the Gemini API.
     -   This will involve using `GenerateContentStream` instead of `GenerateContent`.
     -   The agent should be able to stream back both text content and tool calls as they are generated.

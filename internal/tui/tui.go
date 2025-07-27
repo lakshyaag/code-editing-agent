@@ -31,7 +31,6 @@ const (
 	agentMessage
 	toolMessage
 	streamChunk
-	tokenInfo
 )
 
 // A message to indicate that the agent has finished processing
@@ -40,27 +39,29 @@ type agentResponseMsg []agent.Message
 // A message for streaming content chunks
 type streamChunkMsg string
 
-// A message for token information
-type tokenInfoMsg string
+// A message for tool messages during streaming
+type toolMessageMsg agent.Message
 
-// A message for real-time updates during streaming (tool calls, tokens, etc.)
-type streamUpdateMsg agent.Message
+// A message for streaming completion
+type streamCompleteMsg struct {
+	finalMessages []agent.Message
+}
 
 type model struct {
-	viewport        viewport.Model
-	textarea        textarea.Model
-	spinner         spinner.Model
-	agent           *agent.Agent
-	err             error
-	showSpinner     bool
-	messages        []message
-	width, height   int
-	showStatusBar   bool
-	clickableLines  map[int]int
-	streamingMsg    *message // Current message being streamed
-	enableStreaming bool
+	viewport       viewport.Model
+	textarea       textarea.Model
+	spinner        spinner.Model
+	agent          *agent.Agent
+	err            error
+	showSpinner    bool
+	messages       []message
+	width, height  int
+	showStatusBar  bool
+	clickableLines map[int]int
+	streamingMsg   *message // Current message being streamed
 	// Channels for real-time streaming
 	streamChunkChan    chan streamChunkMsg
+	toolMessageChan    chan toolMessageMsg
 	streamCompleteChan chan streamCompleteMsg
 }
 
@@ -91,8 +92,8 @@ func InitialModel(agent *agent.Agent) *model {
 		messages:           []message{{mType: agentMessage, content: "Welcome to the AI Agent!"}},
 		showStatusBar:      true,
 		clickableLines:     make(map[int]int),
-		enableStreaming:    true, // Enable streaming by default
 		streamChunkChan:    make(chan streamChunkMsg, 100),
+		toolMessageChan:    make(chan toolMessageMsg, 10),
 		streamCompleteChan: make(chan streamCompleteMsg, 1),
 	}
 }
@@ -138,16 +139,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
-		case tea.KeyF1:
-			// Toggle streaming mode
-			m.enableStreaming = !m.enableStreaming
-			statusMsg := "Streaming disabled"
-			if m.enableStreaming {
-				statusMsg = "Streaming enabled"
-			}
-			m.messages = append(m.messages, message{mType: tokenInfo, content: statusMsg})
-			m.viewport.SetContent(m.renderConversation())
-			return m, nil
 		case tea.KeyEnter:
 			userInput := m.textarea.Value()
 			if userInput == "" {
@@ -160,32 +151,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showSpinner = true
 			m.textarea.Blur()
 
-			if m.enableStreaming {
-				// Start streaming response
-				m.streamingMsg = &message{mType: agentMessage, content: "", isStreaming: true}
-				m.messages = append(m.messages, *m.streamingMsg)
-				m.viewport.SetContent(m.renderConversation())
+			// Don't create streaming message placeholder yet - wait for actual text chunks
+			// Tool messages will appear first, then streaming message when text starts
 
-				return m, tea.Batch(sCmd, m.streamingCommand(userInput))
-			} else {
-				// Use regular (non-streaming) response
-				return m, tea.Batch(sCmd, func() tea.Msg {
-					// Call the agent's ProcessMessage function
-					response, err := m.agent.ProcessMessage(context.Background(), userInput)
-					if err != nil {
-						return agentResponseMsg{
-							{Type: agent.AgentMessage, Content: fmt.Sprintf("Error: %v", err), IsError: true},
-						}
-					}
-					return agentResponseMsg(response)
-				})
-			}
+			return m, tea.Batch(sCmd, m.streamingCommand(userInput))
 		}
 	case streamStartMsg:
 		// Start the real-time streaming process
 		go func() {
-			// Call the agent's ProcessMessageStreamWithMessageCallback for real-time tool calls
-			response, err := m.agent.ProcessMessageStreamWithMessageCallback(context.Background(), msg.userInput,
+			// Call the agent's ProcessMessage for streaming with tool callback
+			response, err := m.agent.ProcessMessage(context.Background(), msg.userInput,
 				// Text callback for streaming chunks
 				func(chunk string) error {
 					select {
@@ -195,10 +170,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return nil
 				},
-				// Message callback for tool calls and other messages
-				func(agentMsg agent.Message) error {
-					// Send tool calls and other messages immediately
-					// We'll handle these via the completion channel for now
+				// Tool callback for immediate tool message display
+				func(toolMsg agent.Message) error {
+					select {
+					case m.toolMessageChan <- toolMessageMsg(toolMsg):
+					default:
+						// Channel full, skip to avoid blocking
+					}
 					return nil
 				})
 
@@ -215,13 +193,33 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamCompleteChan <- streamCompleteMsg{finalMessages: response}
 		}()
 
-		// Start listening for chunks and completion
+		// Start listening for chunks, tool messages, and completion
 		return m, tea.Batch(
 			waitForStreamChunk(m.streamChunkChan),
+			waitForToolMessage(m.toolMessageChan),
 			waitForStreamComplete(m.streamCompleteChan),
 		)
+	case toolMessageMsg:
+		// Handle tool message immediately
+		m.messages = append(m.messages, message{
+			mType:       toolMessage,
+			content:     msg.Content,
+			isCollapsed: true,
+			isError:     msg.IsError,
+		})
+		m.viewport.SetContent(m.renderConversation())
+		m.viewport.GotoBottom()
+
+		// Continue listening for tool messages
+		return m, waitForToolMessage(m.toolMessageChan)
 	case streamChunkMsg:
 		// Handle streaming content chunk
+		// Create streaming message if it doesn't exist yet
+		if m.streamingMsg == nil {
+			m.streamingMsg = &message{mType: agentMessage, content: "", isStreaming: true}
+			m.messages = append(m.messages, *m.streamingMsg)
+		}
+
 		if m.streamingMsg != nil {
 			m.streamingMsg.content += string(msg)
 			// Update the last message in the list
@@ -244,35 +242,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamingMsg = nil
 		}
 
-		// Add any additional messages (like token info, tool calls)
-		// Skip StreamChunk messages since they were already processed during streaming
+		// Note: Tool messages were already added via the toolMessageMsg handler
+		// We only need to process any remaining non-tool messages here
 		for _, agentMsg := range msg.finalMessages {
 			switch agentMsg.Type {
-			case agent.ToolMessage:
-				m.messages = append(m.messages, message{
-					mType:       toolMessage,
-					content:     agentMsg.Content,
-					isCollapsed: true,
-					isError:     agentMsg.IsError,
-				})
-			case agent.TokenInfo:
-				m.messages = append(m.messages, message{
-					mType:   tokenInfo,
-					content: agentMsg.Content,
-				})
 			case agent.StreamChunk:
 				// Skip - these were already processed during streaming
+				continue
+			case agent.ToolMessage:
+				// Skip - these were already processed via callback
 				continue
 			}
 		}
 
 		m.viewport.SetContent(m.renderConversation())
 		m.viewport.GotoBottom()
-		return m, nil
-	case tokenInfoMsg:
-		// Handle token information
-		m.messages = append(m.messages, message{mType: tokenInfo, content: string(msg)})
-		m.viewport.SetContent(m.renderConversation())
 		return m, nil
 	case agentResponseMsg:
 		m.showSpinner = false
@@ -284,69 +268,38 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamingMsg = nil
 		}
 
-		// When streaming, we need to handle chunks differently
-		if m.enableStreaming {
-			// Remove the placeholder streaming message
-			if len(m.messages) > 0 && m.messages[len(m.messages)-1].isStreaming {
-				m.messages = m.messages[:len(m.messages)-1]
-			}
+		// Remove the placeholder streaming message if it exists
+		if len(m.messages) > 0 && m.messages[len(m.messages)-1].isStreaming {
+			m.messages = m.messages[:len(m.messages)-1]
+		}
 
-			// Accumulate all stream chunks into one message
-			var accumulatedContent string
-			var hasStreamChunks bool
+		// Accumulate all stream chunks into one message
+		var accumulatedContent string
+		var hasStreamChunks bool
 
-			for _, agentMsg := range msg {
-				switch agentMsg.Type {
-				case agent.StreamChunk:
-					accumulatedContent += agentMsg.Content
-					hasStreamChunks = true
-				case agent.ToolMessage:
-					m.messages = append(m.messages, message{
-						mType:       toolMessage,
-						content:     agentMsg.Content,
-						isCollapsed: true,
-						isError:     agentMsg.IsError,
-					})
-				case agent.TokenInfo:
-					m.messages = append(m.messages, message{
-						mType:   tokenInfo,
-						content: agentMsg.Content,
-					})
-				}
-			}
-
-			// Add the accumulated streaming content as a single agent message
-			if hasStreamChunks {
+		for _, agentMsg := range msg {
+			switch agentMsg.Type {
+			case agent.StreamChunk:
+				accumulatedContent += agentMsg.Content
+				hasStreamChunks = true
+			case agent.ToolMessage:
 				m.messages = append(m.messages, message{
-					mType:   agentMessage,
-					content: accumulatedContent,
-				})
-			}
-		} else {
-			// Non-streaming mode: process messages normally
-			for _, agentMsg := range msg {
-				var mType messageType
-				switch agentMsg.Type {
-				case agent.UserMessage:
-					mType = userMessage
-				case agent.AgentMessage:
-					mType = agentMessage
-				case agent.ToolMessage:
-					mType = toolMessage
-				case agent.StreamChunk:
-					mType = streamChunk
-				case agent.TokenInfo:
-					mType = tokenInfo
-				}
-
-				m.messages = append(m.messages, message{
-					mType:       mType,
+					mType:       toolMessage,
 					content:     agentMsg.Content,
-					isCollapsed: mType == toolMessage,
+					isCollapsed: true,
 					isError:     agentMsg.IsError,
 				})
 			}
 		}
+
+		// Add the accumulated streaming content as a single agent message
+		if hasStreamChunks {
+			m.messages = append(m.messages, message{
+				mType:   agentMessage,
+				content: accumulatedContent,
+			})
+		}
+
 		m.viewport.SetContent(m.renderConversation())
 		m.viewport.GotoBottom()
 		return m, nil
@@ -365,13 +318,7 @@ func (m *model) View() string {
 
 	var taView string
 	if m.showSpinner {
-		var spinnerText string
-		if m.enableStreaming {
-			spinnerText = " Agent is thinking and will stream response..."
-		} else {
-			spinnerText = " Agent is thinking..."
-		}
-		spinner := m.spinner.View() + spinnerText
+		spinner := m.spinner.View() + " Agent is thinking..."
 		taView = lipgloss.NewStyle().
 			Width(m.width).
 			Height(m.textarea.Height()).
@@ -402,8 +349,6 @@ func (m *model) renderConversation() string {
 	agentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	toolStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	errorToolStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	tokenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true)
-	streamingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Italic(true)
 
 	for i, msg := range m.messages {
 		var renderedBlock string
@@ -414,13 +359,7 @@ func (m *model) renderConversation() string {
 			renderedBlock = lipgloss.JoinHorizontal(lipgloss.Top, userStyle.Render(prefix), wrappedContent)
 		case agentMessage:
 			prefix := "Agent: "
-			if msg.isStreaming {
-				prefix = "Agent (streaming): "
-			}
 			style := agentStyle
-			if msg.isStreaming {
-				style = streamingStyle
-			}
 			wrappedContent := wrapText(msg.content, m.viewport.Width-lipgloss.Width(prefix))
 			renderedBlock = lipgloss.JoinHorizontal(lipgloss.Top, style.Render(prefix), wrappedContent)
 		case toolMessage:
@@ -446,8 +385,6 @@ func (m *model) renderConversation() string {
 				wrappedContent := wrapText(msg.content, m.viewport.Width)
 				renderedBlock = lipgloss.JoinVertical(lipgloss.Left, header, wrappedContent)
 			}
-		case tokenInfo:
-			renderedBlock = tokenStyle.Render("ℹ " + msg.content)
 		}
 		lines = append(lines, renderedBlock)
 		currentLine += lipgloss.Height(renderedBlock)
@@ -473,19 +410,11 @@ func (m *model) statusBarView() string {
 	tokenInfo := fmt.Sprintf("Tokens: %d in, %d out, %d total",
 		tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.TotalTokens)
 
-	// Add streaming status
-	streamingStatus := "Streaming: OFF"
-	if m.enableStreaming {
-		streamingStatus = "Streaming: ON"
-	}
-
 	status := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		lipgloss.NewStyle().Padding(0, 1).Render(modelInfo),
 		lipgloss.NewStyle().Padding(0, 1).Render(cwdInfo),
 		lipgloss.NewStyle().Padding(0, 1).Render(tokenInfo),
-		lipgloss.NewStyle().Padding(0, 1).Render(streamingStatus),
-		lipgloss.NewStyle().Padding(0, 1).Render("F1: Toggle Streaming"),
 	)
 
 	return lipgloss.NewStyle().
@@ -523,6 +452,13 @@ func waitForStreamChunk(ch <-chan streamChunkMsg) tea.Cmd {
 	}
 }
 
+// waitForToolMessage creates a command that waits for the next tool message
+func waitForToolMessage(ch <-chan toolMessageMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
+}
+
 // waitForStreamComplete creates a command that waits for streaming completion
 func waitForStreamComplete(ch <-chan streamCompleteMsg) tea.Cmd {
 	return func() tea.Msg {
@@ -533,8 +469,4 @@ func waitForStreamComplete(ch <-chan streamCompleteMsg) tea.Cmd {
 // New message types for real-time streaming
 type streamStartMsg struct {
 	userInput string
-}
-
-type streamCompleteMsg struct {
-	finalMessages []agent.Message
 }

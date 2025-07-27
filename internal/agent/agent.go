@@ -28,8 +28,8 @@ type (
 	// StreamingCallback is called for each chunk of streaming content
 	StreamingCallback func(chunk string) error
 
-	// StreamingMessageCallback is called for any message during streaming (chunks, tool calls, etc.)
-	StreamingMessageCallback func(msg Message) error
+	// ToolMessageCallback is called when a tool message is ready to display
+	ToolMessageCallback func(msg Message) error
 )
 
 const (
@@ -37,7 +37,6 @@ const (
 	AgentMessage
 	ToolMessage
 	StreamChunk
-	TokenInfo
 )
 
 // Agent represents the main AI agent that can execute tools
@@ -98,8 +97,8 @@ func (a *Agent) precomputeFunctionDeclarations() error {
 	return nil
 }
 
-// ProcessMessage handles a single user message and returns the agent's response
-func (a *Agent) ProcessMessage(ctx context.Context, userInput string) ([]Message, error) {
+// ProcessMessage handles a single user message and streams the agent's response
+func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback) ([]Message, error) {
 	messages := []Message{}
 	userMessageContent := &genai.Content{
 		Role: "user",
@@ -110,104 +109,20 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string) ([]Message
 	a.Conversation = append(a.Conversation, userMessageContent)
 
 	for {
-		response, err := a.runInference(ctx, a.Conversation)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(response.Candidates) == 0 {
-			return nil, fmt.Errorf("no response candidates from Gemini")
-		}
-
-		candidate := response.Candidates[0]
-
-		// Add AI response to conversation
-		aiContent := &genai.Content{
-			Role:  "model",
-			Parts: candidate.Content.Parts,
-		}
-		a.Conversation = append(a.Conversation, aiContent)
-
-		// Check for function calls
-		if len(candidate.Content.Parts) > 0 {
-			hasToolCalls := false
-			var toolResults []*genai.Part
-
-			for _, part := range candidate.Content.Parts {
-				if part.FunctionCall != nil {
-					hasToolCalls = true
-					result, isError := a.executeTool(part.FunctionCall.Name, part.FunctionCall.Args)
-					messages = append(messages, Message{Type: ToolMessage, Content: result, IsError: isError})
-					toolResults = append(toolResults, &genai.Part{
-						FunctionResponse: &genai.FunctionResponse{
-							Name:     part.FunctionCall.Name,
-							Response: map[string]interface{}{"result": result},
-						},
-					})
-				}
-			}
-
-			if hasToolCalls {
-				// Add tool results to conversation
-				toolContent := &genai.Content{
-					Role:  "user",
-					Parts: toolResults,
-				}
-				a.Conversation = append(a.Conversation, toolContent)
-				continue
-			}
-		}
-
-		// Return text response
-		for _, part := range candidate.Content.Parts {
-			if part.Text != "" {
-				messages = append(messages, Message{Type: AgentMessage, Content: part.Text})
-				return messages, nil
-			}
-		}
-		return messages, nil // Should not be reached
-	}
-}
-
-// ProcessMessageStream handles a single user message and streams the agent's response with tool calls appearing immediately
-func (a *Agent) ProcessMessageStream(ctx context.Context, userInput string, textCallback StreamingCallback) ([]Message, error) {
-	return a.ProcessMessageStreamWithMessageCallback(ctx, userInput, textCallback, nil)
-}
-
-// ProcessMessageStreamWithMessageCallback handles streaming with both text and message callbacks
-func (a *Agent) ProcessMessageStreamWithMessageCallback(ctx context.Context, userInput string, textCallback StreamingCallback, messageCallback StreamingMessageCallback) ([]Message, error) {
-	messages := []Message{}
-	userMessageContent := &genai.Content{
-		Role: "user",
-		Parts: []*genai.Part{
-			{Text: userInput},
-		},
-	}
-	a.Conversation = append(a.Conversation, userMessageContent)
-
-	for {
-		// Count tokens before inference
-		tokensUsed, err := a.countTokens(ctx, a.Conversation)
-		if err != nil {
-			fmt.Printf("Warning: Could not count tokens: %v\n", err)
-		} else {
-			a.TokenUsage.InputTokens += tokensUsed
-			a.TokenUsage.TotalTokens += tokensUsed
-			messages = append(messages, Message{
-				Type:    TokenInfo,
-				Content: fmt.Sprintf("Input tokens: %d, Total: %d", tokensUsed, a.TokenUsage.TotalTokens),
-			})
+		// Count input tokens and update internal tracking
+		if inputTokens, err := a.countTokens(ctx, a.Conversation); err == nil {
+			a.TokenUsage.InputTokens += inputTokens
+			a.TokenUsage.TotalTokens += inputTokens
 		}
 
 		streamResponse := a.runInferenceStream(ctx, a.Conversation)
 
 		var accumulatedText string
 		var accumulatedParts []*genai.Part
-
-		// Track which tool calls we've already processed to avoid duplicates
+		var toolResults []*genai.Part
 		processedToolCalls := make(map[string]bool)
 
-		// Iterate through the streaming response
+		// Process streaming response
 		for chunk, err := range streamResponse {
 			if err != nil {
 				return nil, fmt.Errorf("streaming error: %w", err)
@@ -218,48 +133,51 @@ func (a *Agent) ProcessMessageStreamWithMessageCallback(ctx context.Context, use
 			}
 
 			candidate := chunk.Candidates[0]
-
-			// Accumulate parts for later processing
 			accumulatedParts = append(accumulatedParts, candidate.Content.Parts...)
 
-			// Process parts in order: tool calls first, then text
+			// Process each part in the chunk
 			for _, part := range candidate.Content.Parts {
-				// Handle tool calls immediately as they appear (before text streaming)
+				// Handle tool calls immediately
 				if part.FunctionCall != nil {
-					// Create a unique key for this tool call to avoid duplicates
 					callKey := fmt.Sprintf("%s:%v", part.FunctionCall.Name, part.FunctionCall.Args)
 					if !processedToolCalls[callKey] {
 						processedToolCalls[callKey] = true
 
-						// Create detailed tool call message with args
-						argsJSON, _ := json.Marshal(part.FunctionCall.Args)
-						toolCallInfo := fmt.Sprintf("🔧 Tool Call: %s\nArguments: %s\n", part.FunctionCall.Name, string(argsJSON))
-
-						// Show tool call immediately (before execution)
-						toolMsg := Message{Type: ToolMessage, Content: toolCallInfo + "Status: Executing...", IsError: false}
-						messages = append(messages, toolMsg)
-						if messageCallback != nil {
-							messageCallback(toolMsg)
-						}
-
-						// Execute the tool immediately
+						// Execute tool and create message
 						result, isError := a.executeTool(part.FunctionCall.Name, part.FunctionCall.Args)
-						toolCallInfo += fmt.Sprintf("Result: %s", result)
 
-						// Update the message with the result
-						finalToolMsg := Message{Type: ToolMessage, Content: toolCallInfo, IsError: isError}
-						messages[len(messages)-1] = finalToolMsg
-						if messageCallback != nil {
-							messageCallback(finalToolMsg)
+						argsJSON, _ := json.Marshal(part.FunctionCall.Args)
+						toolCallInfo := fmt.Sprintf("🔧 Tool Call: %s\nArguments: %s\nResult: %s",
+							part.FunctionCall.Name, string(argsJSON), result)
+
+						toolMsg := Message{
+							Type:    ToolMessage,
+							Content: toolCallInfo,
+							IsError: isError,
 						}
+
+						messages = append(messages, toolMsg)
+
+						// Send tool message immediately via callback
+						if toolCallback != nil {
+							toolCallback(toolMsg)
+						}
+
+						// Prepare tool result for conversation
+						toolResults = append(toolResults, &genai.Part{
+							FunctionResponse: &genai.FunctionResponse{
+								Name:     part.FunctionCall.Name,
+								Response: map[string]interface{}{"result": result},
+							},
+						})
 					}
 				}
 
-				// Then handle text content streaming
+				// Handle text streaming
 				if part.Text != "" {
 					accumulatedText += part.Text
 
-					// Add stream chunk to messages for display
+					// Stream the text chunk
 					messages = append(messages, Message{
 						Type:     StreamChunk,
 						Content:  part.Text,
@@ -275,40 +193,21 @@ func (a *Agent) ProcessMessageStreamWithMessageCallback(ctx context.Context, use
 			}
 		}
 
-		// Add accumulated AI response to conversation
+		// Add AI response to conversation
 		aiContent := &genai.Content{
 			Role:  "model",
 			Parts: accumulatedParts,
 		}
 		a.Conversation = append(a.Conversation, aiContent)
 
-		// Check for function calls in accumulated parts
-		hasToolCalls := false
-		var toolResults []*genai.Part
-
-		for _, part := range accumulatedParts {
-			if part.FunctionCall != nil {
-				hasToolCalls = true
-
-				// Create detailed tool call message with args and result
-				argsJSON, _ := json.Marshal(part.FunctionCall.Args)
-				toolCallInfo := fmt.Sprintf("🔧 Tool Call: %s\nArguments: %s\n", part.FunctionCall.Name, string(argsJSON))
-
-				result, isError := a.executeTool(part.FunctionCall.Name, part.FunctionCall.Args)
-				toolCallInfo += fmt.Sprintf("Result: %s", result)
-
-				messages = append(messages, Message{Type: ToolMessage, Content: toolCallInfo, IsError: isError})
-				toolResults = append(toolResults, &genai.Part{
-					FunctionResponse: &genai.FunctionResponse{
-						Name:     part.FunctionCall.Name,
-						Response: map[string]interface{}{"result": result},
-					},
-				})
-			}
+		// Count output tokens and update internal tracking
+		if outputTokens, err := a.countTokens(ctx, []*genai.Content{aiContent}); err == nil {
+			a.TokenUsage.OutputTokens += outputTokens
+			a.TokenUsage.TotalTokens += outputTokens
 		}
 
-		if hasToolCalls {
-			// Add tool results to conversation
+		// If we have tool calls, add results to conversation and continue
+		if len(toolResults) > 0 {
 			toolContent := &genai.Content{
 				Role:  "user",
 				Parts: toolResults,
@@ -317,47 +216,17 @@ func (a *Agent) ProcessMessageStreamWithMessageCallback(ctx context.Context, use
 			continue
 		}
 
-		// Return accumulated text response
+		// Return final agent message
 		if accumulatedText != "" {
 			messages = append(messages, Message{Type: AgentMessage, Content: accumulatedText})
-
-			// Count output tokens
-			outputTokens, err := a.countTokens(ctx, []*genai.Content{aiContent})
-			if err != nil {
-				fmt.Printf("Warning: Could not count output tokens: %v\n", err)
-			} else {
-				a.TokenUsage.OutputTokens += outputTokens
-				a.TokenUsage.TotalTokens += outputTokens
-				messages = append(messages, Message{
-					Type:    TokenInfo,
-					Content: fmt.Sprintf("Output tokens: %d, Total: %d", outputTokens, a.TokenUsage.TotalTokens),
-				})
-			}
-
-			return messages, nil
 		}
-		return messages, nil // Should not be reached
-	}
-}
 
-// runInference handles the AI inference with tool support
-func (a *Agent) runInference(ctx context.Context, conversation []*genai.Content) (*genai.GenerateContentResponse, error) {
-	// Configure the generation with tools
-	config := &genai.GenerateContentConfig{
-		Tools: []*genai.Tool{
-			{
-				FunctionDeclarations: a.functions,
-			},
-		},
-		MaxOutputTokens: 1024,
+		return messages, nil
 	}
-
-	return a.client.Models.GenerateContent(ctx, a.Model, conversation, config)
 }
 
 // runInferenceStream handles the AI inference with streaming and tool support
 func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Content) iter.Seq2[*genai.GenerateContentResponse, error] {
-	// Configure the generation with tools
 	config := &genai.GenerateContentConfig{
 		Tools: []*genai.Tool{
 			{
@@ -404,15 +273,12 @@ func (a *Agent) executeTool(name string, args map[string]interface{}) (string, b
 		return fmt.Sprintf("Error marshaling arguments: %v", err), true
 	}
 
-	// fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, string(argsJSON))
-
 	result, err := toolDef.Function(argsJSON)
 	if err != nil {
 		result = fmt.Sprintf("Error executing tool %s: %v", name, err)
 		return result, true
 	}
 
-	// fmt.Printf("\u001b[92mresult\u001b[0m: %s\n", result)
 	return result, false
 }
 
