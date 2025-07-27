@@ -32,6 +32,7 @@ const (
 	agentMessage
 	toolMessage
 	streamChunk
+	thoughtMessage
 )
 
 // A message for streaming content chunks
@@ -39,6 +40,9 @@ type streamChunkMsg string
 
 // A message for tool messages during streaming
 type toolMessageMsg agent.Message
+
+// A message for thought messages during streaming
+type thoughtMessageMsg agent.Message
 
 // A message for streaming completion
 type streamCompleteMsg struct {
@@ -61,6 +65,7 @@ type model struct {
 	// Channels for real-time streaming
 	streamChunkChan    chan streamChunkMsg
 	toolMessageChan    chan toolMessageMsg
+	thoughtMessageChan chan thoughtMessageMsg
 	streamCompleteChan chan streamCompleteMsg
 	// Markdown renderer for agent messages
 	markdownRenderer *glamour.TermRenderer
@@ -129,6 +134,7 @@ func InitialModel(agent *agent.Agent) *model {
 		streamingMsgIndex:  -1, // Initialize to -1 (no streaming message)
 		streamChunkChan:    make(chan streamChunkMsg, 100),
 		toolMessageChan:    make(chan toolMessageMsg, 10),
+		thoughtMessageChan: make(chan thoughtMessageMsg, 10),
 		streamCompleteChan: make(chan streamCompleteMsg, 1),
 		markdownRenderer:   markdownRenderer,
 		modelSelectionMode: false,
@@ -249,10 +255,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case tea.KeyCtrlT:
-			// Unify the state of all tool messages
+			// Unify the state of all tool and thought messages
 			var anyExpanded bool
 			for _, msg := range m.messages {
-				if msg.mType == toolMessage && !msg.isCollapsed {
+				if (msg.mType == toolMessage || msg.mType == thoughtMessage) && !msg.isCollapsed {
 					anyExpanded = true
 					break
 				}
@@ -260,7 +266,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// If any are expanded, collapse all. Otherwise, expand all.
 			for i, msg := range m.messages {
-				if msg.mType == toolMessage {
+				if msg.mType == toolMessage || msg.mType == thoughtMessage {
 					m.messages[i].isCollapsed = anyExpanded
 				}
 			}
@@ -305,6 +311,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Channel full, skip to avoid blocking
 					}
 					return nil
+				},
+				// Thought callback for immediate thought message display
+				func(thoughtMsg agent.Message) error {
+					select {
+					case m.thoughtMessageChan <- thoughtMessageMsg(thoughtMsg):
+					default:
+						// Channel full, skip to avoid blocking
+					}
+					return nil
 				})
 
 			if err != nil {
@@ -324,6 +339,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			waitForStreamChunk(m.streamChunkChan),
 			waitForToolMessage(m.toolMessageChan),
+			waitForThoughtMessage(m.thoughtMessageChan),
 			waitForStreamComplete(m.streamCompleteChan),
 		)
 	case toolMessageMsg:
@@ -351,6 +367,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Continue listening for tool messages
 		return m, waitForToolMessage(m.toolMessageChan)
+	case thoughtMessageMsg:
+		// Handle thought message immediately
+		newThoughtMsg := message{
+			mType:       thoughtMessage,
+			content:     msg.Content,
+			isCollapsed: true,
+			isError:     msg.IsError,
+		}
+
+		// If streaming has started, insert the thought message before the streaming message
+		if m.streamingMsgIndex != -1 {
+			// Insert at the correct position
+			m.messages = append(m.messages[:m.streamingMsgIndex], append([]message{newThoughtMsg}, m.messages[m.streamingMsgIndex:]...)...)
+			// Update the index of the streaming message
+			m.streamingMsgIndex++
+		} else {
+			// Otherwise, just append
+			m.messages = append(m.messages, newThoughtMsg)
+		}
+
+		m.viewport.SetContent(m.renderConversation())
+		m.viewport.GotoBottom()
+
+		// Continue listening for thought messages
+		return m, waitForThoughtMessage(m.thoughtMessageChan)
 	case streamChunkMsg:
 		// Handle streaming content chunk
 		// Create streaming message if it doesn't exist yet
@@ -471,6 +512,13 @@ func waitForToolMessage(ch <-chan toolMessageMsg) tea.Cmd {
 
 // waitForStreamComplete creates a command that waits for streaming completion
 func waitForStreamComplete(ch <-chan streamCompleteMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
+}
+
+// waitForThoughtMessage creates a command that waits for the next thought message
+func waitForThoughtMessage(ch <-chan thoughtMessageMsg) tea.Cmd {
 	return func() tea.Msg {
 		return <-ch
 	}

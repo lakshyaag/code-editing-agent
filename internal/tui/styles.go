@@ -26,6 +26,11 @@ var (
 				Background(lipgloss.Color("237")). // A lighter gray
 				Padding(0, 1)
 
+	// Thought message background style
+	thoughtBackgroundStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("236")). // A slightly different gray
+				Padding(0, 1)
+
 	// Status bar style
 	statusBarStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("235")).

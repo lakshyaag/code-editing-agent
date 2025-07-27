@@ -23,6 +23,8 @@ func (m *model) renderConversation() string {
 			renderedBlock = m.renderAgentMessage(msg)
 		case toolMessage:
 			renderedBlock = m.renderToolMessage(msg, i, &currentLine)
+		case thoughtMessage:
+			renderedBlock = m.renderThoughtMessage(msg, i, &currentLine)
 		}
 		lines = append(lines, renderedBlock)
 		currentLine += lipgloss.Height(renderedBlock)
@@ -118,6 +120,43 @@ func (m *model) renderToolMessage(msg message, index int, currentLine *int) stri
 	}
 }
 
+// renderThoughtMessage renders a thought message with modern styling
+func (m *model) renderThoughtMessage(msg message, index int, currentLine *int) string {
+	// Get thinking icon and styling
+	thinkingIcon := "💭"
+
+	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244")) // Gray color for thoughts
+
+	expandIcon := getExpandCollapseIcon(msg.isCollapsed)
+	headerText := fmt.Sprintf("%s %s Thinking", expandIcon, thinkingIcon)
+	header := headerStyle.Render(headerText)
+
+	// Make the entire header line clickable
+	m.clickableLines[*currentLine] = index
+
+	if msg.isCollapsed {
+		return thoughtBackgroundStyle.Width(m.width).Render(header)
+	} else {
+		// Extract the actual thought content (remove the "💭 Thinking: " prefix if present)
+		content := strings.TrimPrefix(msg.content, "💭 Thinking: ")
+
+		// Render the thought content as markdown
+		renderedContent, err := m.markdownRenderer.Render(content)
+		if err != nil {
+			// Fallback to simple text if markdown fails
+			renderedContent = content
+		} else {
+			renderedContent = strings.TrimRight(renderedContent, "\n")
+		}
+
+		// Indent the content for a cleaner look
+		indentedContent := lipgloss.NewStyle().PaddingLeft(4).Render(renderedContent)
+
+		fullBlock := lipgloss.JoinVertical(lipgloss.Left, header, indentedContent)
+		return thoughtBackgroundStyle.Width(m.width).Render(fullBlock)
+	}
+}
+
 // statusBarView renders the status bar with current information
 func (m *model) statusBarView() string {
 	if !m.showStatusBar {
@@ -138,7 +177,7 @@ func (m *model) statusBarView() string {
 		tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.TotalTokens)
 
 	// Add help text
-	helpInfo := "F2: Model | Ctrl+T: Tools"
+	helpInfo := "F2: Model | Ctrl+T: Tools/Thoughts"
 	if m.modelSelectionMode {
 		helpInfo = "↑/↓: Navigate | Enter: Select | Esc: Cancel"
 	}

@@ -12,6 +12,7 @@ import (
 )
 
 func main() {
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {

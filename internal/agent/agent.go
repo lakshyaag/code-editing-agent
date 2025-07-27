@@ -32,6 +32,9 @@ type (
 
 	// ToolMessageCallback is called when a tool message is ready to display
 	ToolMessageCallback func(msg Message) error
+
+	// ThoughtMessageCallback is called when a thought message is ready to display
+	ThoughtMessageCallback func(msg Message) error
 )
 
 const (
@@ -39,6 +42,7 @@ const (
 	AgentMessage
 	ToolMessage
 	StreamChunk
+	ThoughtMessage
 )
 
 // Agent represents the main AI agent that can execute tools
@@ -100,7 +104,7 @@ func (a *Agent) precomputeFunctionDeclarations() error {
 }
 
 // ProcessMessage handles a single user message and streams the agent's response
-func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback) ([]Message, error) {
+func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback, thoughtCallback ThoughtMessageCallback) ([]Message, error) {
 	messages := []Message{}
 	userMessageContent := &genai.Content{
 		Role: "user",
@@ -139,6 +143,22 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 
 			// Process each part in the chunk
 			for _, part := range candidate.Content.Parts {
+				// Handle thought messages immediately
+				if part.Thought && part.Text != "" {
+					thoughtMsg := Message{
+						Type:    ThoughtMessage,
+						Content: fmt.Sprintf("💭 Thinking: %s", part.Text),
+					}
+
+					messages = append(messages, thoughtMsg)
+
+					// Send thought message immediately via callback
+					if thoughtCallback != nil {
+						thoughtCallback(thoughtMsg)
+					}
+					continue // Don't process this as regular text
+				}
+
 				// Handle tool calls immediately
 				if part.FunctionCall != nil {
 					callKey := fmt.Sprintf("%s:%v", part.FunctionCall.Name, part.FunctionCall.Args)
@@ -229,6 +249,8 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 
 // runInferenceStream handles the AI inference with streaming and tool support
 func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Content) iter.Seq2[*genai.GenerateContentResponse, error] {
+	thinkingBudgetVal := int32(-1)
+
 	config := &genai.GenerateContentConfig{
 		Tools: []*genai.Tool{
 			{
@@ -237,6 +259,10 @@ func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Co
 		},
 		MaxOutputTokens:   1024,
 		SystemInstruction: genai.NewContentFromText(config.SystemPrompt, genai.RoleUser),
+		ThinkingConfig: &genai.ThinkingConfig{
+			ThinkingBudget:  &thinkingBudgetVal,
+			IncludeThoughts: true,
+		},
 	}
 
 	return a.client.Models.GenerateContentStream(ctx, a.Model, conversation, config)

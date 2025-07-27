@@ -250,3 +250,62 @@ This matches the behavior shown in the [official Gemini function calling example
 - Implemented token counting using `genai.CountTokensConfig` and `CountTokens` API
 - Streaming preserves conversation history and tool execution flow
 - TUI maintains backward compatibility while adding new streaming features 
+
+---
+
+## 2025-01-27: Thought Message Support - Displaying Gemini's Thinking Process
+
+### 🧠 IMPLEMENTED: Real-time display of Gemini's thought messages
+
+**Feature Request**: Display Gemini's thought messages (thinking process) in the TUI, similar to how tool messages are displayed.
+
+**Context**: The debug.log showed that Gemini API returns thought messages with `"thought": true` field when thinking mode is enabled. These messages provide insight into the model's reasoning process.
+
+**Solution - Thought Message Architecture**:
+1. **Agent Level**: Added `ThoughtMessage` type and `ThoughtMessageCallback` for real-time delivery
+2. **Streaming Handler**: Detect thought parts via `part.Thought` field and send immediately
+3. **TUI Integration**: Display thoughts in collapsible blocks similar to tool messages
+4. **Visual Design**: Gray color scheme (💭) to distinguish from tools (🔧)
+5. **Unified Controls**: Ctrl+T toggles both tools and thoughts together
+
+**Technical Implementation**:
+
+**Agent Package Changes**:
+- Added `ThoughtMessage` to `MessageType` enum
+- Added `ThoughtMessageCallback` type
+- Updated `ProcessMessage` signature to accept `thoughtCallback` parameter
+- Added thought detection: `if part.Thought && part.Text != ""`
+- Format thoughts with 💭 emoji prefix
+
+**TUI Package Changes**:
+- Added `thoughtMessage` to messageType enum  
+- Added `thoughtMessageMsg` and `thoughtMessageChan` for channel communication
+- Implemented `waitForThoughtMessage` command pattern
+- Added thought message handler in Update method
+- Updated Ctrl+T to toggle both tools and thoughts
+
+**Rendering Changes**:
+- Added `renderThoughtMessage` function with collapsible UI
+- Gray color scheme: header color "244", background color "236"
+- Markdown rendering support for thought content
+- Updated help text: "Ctrl+T: Tools/Thoughts"
+
+**Key Features**:
+- **Real-time Display**: Thoughts appear immediately during streaming
+- **Collapsible UI**: Click to expand/collapse thought details
+- **Unified Experience**: Same interaction pattern as tool messages
+- **Visual Hierarchy**: Different colors help distinguish message types
+- **Thinking Mode Integration**: Automatically enabled via `ThinkingConfig`
+
+**Result**: Users can now see Gemini's reasoning process in real-time when thinking mode is enabled. The thoughts appear as collapsible gray blocks before the final response, providing transparency into the AI's decision-making process.
+
+**Build Status**: ✅ Compiles successfully, `go vet` passes
+
+**References**: 
+- [Gemini Thinking Mode Documentation](https://ai.google.dev/gemini-api/docs/thinking#go_2)
+
+---
+
+## Debug Logging Issue
+
+**Note**: The agent currently contains debug logging that writes JSON chunks to stdout (`log.Printf` in agent.go line 139). This interferes with the bubbletea TUI. When building TUI apps with bubbletea, you cannot log or print to the terminal - instead use Delve for debugging as noted in the memories. 
