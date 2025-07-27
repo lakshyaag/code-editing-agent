@@ -36,6 +36,13 @@ func Load() (*Config, error) {
 		model = defaultModel
 	}
 
+	// Check for saved user preferences
+	prefs, err := LoadPreferences()
+	if err == nil && prefs.SelectedModel != "" {
+		// User preference takes precedence over environment variable
+		model = prefs.SelectedModel
+	}
+
 	return &Config{
 		APIKey: apiKey,
 		Model:  model,

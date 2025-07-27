@@ -137,11 +137,18 @@ func (m *model) statusBarView() string {
 	tokenInfo := fmt.Sprintf("Tokens: %d in, %d out, %d total",
 		tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.TotalTokens)
 
+	// Add help text
+	helpInfo := "F2: Model | Ctrl+T: Tools"
+	if m.modelSelectionMode {
+		helpInfo = "↑/↓: Navigate | Enter: Select | Esc: Cancel"
+	}
+
 	status := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		lipgloss.NewStyle().Padding(0, 1).Render(modelInfo),
 		lipgloss.NewStyle().Padding(0, 1).Render(cwdInfo),
 		lipgloss.NewStyle().Padding(0, 1).Render(tokenInfo),
+		lipgloss.NewStyle().Padding(0, 1).Foreground(lipgloss.Color("241")).Render(helpInfo),
 	)
 
 	return statusBarStyle.Width(m.width).Render(status)

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"agent/internal/agent"
+	"agent/internal/config"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -63,6 +64,10 @@ type model struct {
 	streamCompleteChan chan streamCompleteMsg
 	// Markdown renderer for agent messages
 	markdownRenderer *glamour.TermRenderer
+	// Model selection
+	modelSelectionMode bool
+	selectedModelIndex int
+	availableModels    []string
 }
 
 func InitialModel(agent *agent.Agent) *model {
@@ -81,7 +86,6 @@ func InitialModel(agent *agent.Agent) *model {
 
 	// Initialize viewport
 	vp := viewport.New(80, 20)
-	vp.SetContent("Welcome to the AI Agent!")
 
 	// Initialize markdown renderer with auto-style (dark/light) and appropriate width
 	markdownRenderer, err := glamour.NewTermRenderer(
@@ -91,6 +95,26 @@ func InitialModel(agent *agent.Agent) *model {
 	if err != nil {
 		// Fallback to a simple renderer if there's an error
 		markdownRenderer, _ = glamour.NewTermRenderer()
+	}
+
+	// Available Gemini models based on the documentation
+	availableModels := []string{
+		"gemini-2.5-pro",
+		"gemini-2.5-flash",
+		"gemini-2.5-flash-lite",
+		"gemini-2.0-flash",
+		"gemini-2.0-flash-lite",
+		"gemini-1.5-pro",
+		"gemini-1.5-flash",
+	}
+
+	// Find current model index
+	currentModelIndex := 1 // Default to gemini-2.5-flash
+	for i, model := range availableModels {
+		if model == agent.Model {
+			currentModelIndex = i
+			break
+		}
 	}
 
 	return &model{
@@ -107,6 +131,9 @@ func InitialModel(agent *agent.Agent) *model {
 		toolMessageChan:    make(chan toolMessageMsg, 10),
 		streamCompleteChan: make(chan streamCompleteMsg, 1),
 		markdownRenderer:   markdownRenderer,
+		modelSelectionMode: false,
+		selectedModelIndex: currentModelIndex,
+		availableModels:    availableModels,
 	}
 }
 
@@ -160,9 +187,67 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.KeyMsg:
+		// Model selection mode has priority
+		if m.modelSelectionMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.modelSelectionMode = false
+				m.textarea.Focus()
+				return m, nil
+			case tea.KeyUp:
+				if m.selectedModelIndex > 0 {
+					m.selectedModelIndex--
+				}
+				return m, nil
+			case tea.KeyDown:
+				if m.selectedModelIndex < len(m.availableModels)-1 {
+					m.selectedModelIndex++
+				}
+				return m, nil
+			case tea.KeyEnter:
+				// Update the agent's model
+				m.agent.Model = m.availableModels[m.selectedModelIndex]
+				m.modelSelectionMode = false
+				m.textarea.Focus()
+
+				// Save the selected model to preferences
+				prefs := &config.UserPreferences{
+					SelectedModel: m.agent.Model,
+				}
+				if err := config.SavePreferences(prefs); err != nil {
+					// Log error but don't fail the operation
+					m.messages = append(m.messages, message{
+						mType:   agentMessage,
+						content: fmt.Sprintf("Model switched to: %s (failed to save preference: %v)", m.agent.Model, err),
+						isError: true,
+					})
+				} else {
+					// Add a message to show model change
+					m.messages = append(m.messages, message{
+						mType:   agentMessage,
+						content: fmt.Sprintf("Model switched to: %s", m.agent.Model),
+					})
+				}
+
+				m.viewport.SetContent(m.renderConversation())
+				m.viewport.GotoBottom()
+				return m, nil
+			}
+			return m, nil
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyF2:
+			// Toggle model selection mode
+			m.modelSelectionMode = !m.modelSelectionMode
+			if m.modelSelectionMode {
+				m.textarea.Blur()
+			} else {
+				m.textarea.Focus()
+			}
+			return m, nil
 		case tea.KeyCtrlT:
 			// Unify the state of all tool messages
 			var anyExpanded bool
@@ -339,12 +424,19 @@ func (m *model) View() string {
 		taView = m.textarea.View()
 	}
 
-	return lipgloss.JoinVertical(
+	mainView := lipgloss.JoinVertical(
 		lipgloss.Left,
 		m.viewport.View(),
 		taView,
 		m.statusBarView(),
 	)
+
+	// Overlay model selector if in model selection mode
+	if m.modelSelectionMode {
+		return m.renderModelSelector(mainView)
+	}
+
+	return mainView
 }
 
 func Start(agent *agent.Agent) {
@@ -387,4 +479,70 @@ func waitForStreamComplete(ch <-chan streamCompleteMsg) tea.Cmd {
 // New message types for real-time streaming
 type streamStartMsg struct {
 	userInput string
+}
+
+// renderModelSelector renders the model selection overlay
+func (m *model) renderModelSelector(background string) string {
+	// Create the model selector box
+	selectorStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("86")).
+		Padding(1, 2).
+		Background(lipgloss.Color("235"))
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("86")).
+		MarginBottom(1)
+
+	title := titleStyle.Render("Select Model (↑/↓ to navigate, Enter to select, Esc to cancel)")
+
+	// Build the model list
+	var modelItems []string
+	for i, modelName := range m.availableModels {
+		itemStyle := lipgloss.NewStyle().Padding(0, 1)
+		if i == m.selectedModelIndex {
+			// Highlight the selected model
+			itemStyle = itemStyle.
+				Background(lipgloss.Color("86")).
+				Foreground(lipgloss.Color("235")).
+				Bold(true)
+		}
+
+		// Add indicator for current model
+		indicator := "  "
+		if modelName == m.agent.Model {
+			indicator = "• "
+		}
+
+		modelItems = append(modelItems, itemStyle.Render(indicator+modelName))
+	}
+
+	modelList := lipgloss.JoinVertical(lipgloss.Left, modelItems...)
+	content := lipgloss.JoinVertical(lipgloss.Left, title, modelList)
+
+	// Add help text at the bottom
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("241")).
+		MarginTop(1).
+		Italic(true)
+
+	helpText := helpStyle.Render("F2: Toggle model selector")
+	contentWithHelp := lipgloss.JoinVertical(lipgloss.Left, content, helpText)
+
+	selectorBox := selectorStyle.Render(contentWithHelp)
+
+	// Create an overlay effect
+	overlayStyle := lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height)
+
+	// Position the selector in the center
+	positionedSelector := lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		selectorBox,
+	)
+
+	return overlayStyle.Render(positionedSelector)
 }
