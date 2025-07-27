@@ -73,6 +73,8 @@ type model struct {
 	modelSelectionMode bool
 	selectedModelIndex int
 	availableModels    []string
+	// Track if streaming was interrupted by tools
+	streamingWasInterrupted bool
 }
 
 func InitialModel(agent *agent.Agent) *model {
@@ -123,23 +125,26 @@ func InitialModel(agent *agent.Agent) *model {
 	}
 
 	return &model{
-		textarea:           ta,
-		viewport:           vp,
-		spinner:            s,
-		agent:              agent,
-		showSpinner:        false,
-		messages:           []message{{mType: agentMessage, content: config.WelcomeMessage}},
-		showStatusBar:      true,
-		clickableLines:     make(map[int]int),
-		streamingMsgIndex:  -1, // Initialize to -1 (no streaming message)
-		streamChunkChan:    make(chan streamChunkMsg, 100),
-		toolMessageChan:    make(chan toolMessageMsg, 10),
-		thoughtMessageChan: make(chan thoughtMessageMsg, 10),
-		streamCompleteChan: make(chan streamCompleteMsg, 1),
-		markdownRenderer:   markdownRenderer,
-		modelSelectionMode: false,
-		selectedModelIndex: currentModelIndex,
-		availableModels:    availableModels,
+		textarea:    ta,
+		viewport:    vp,
+		spinner:     s,
+		agent:       agent,
+		showSpinner: false,
+		messages: []message{
+			{mType: agentMessage, content: fmt.Sprintf(config.WelcomeMessage, len(config.SystemPrompt))},
+		},
+		showStatusBar:           true,
+		clickableLines:          make(map[int]int),
+		streamingMsgIndex:       -1, // Initialize to -1 (no streaming message)
+		streamChunkChan:         make(chan streamChunkMsg, 100),
+		toolMessageChan:         make(chan toolMessageMsg, 10),
+		thoughtMessageChan:      make(chan thoughtMessageMsg, 10),
+		streamCompleteChan:      make(chan streamCompleteMsg, 1),
+		markdownRenderer:        markdownRenderer,
+		modelSelectionMode:      false,
+		selectedModelIndex:      currentModelIndex,
+		availableModels:         availableModels,
+		streamingWasInterrupted: false,
 	}
 }
 
@@ -284,6 +289,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showSpinner = true
 			m.textarea.Blur()
 
+			// Reset the flag for the new conversation turn
+			m.streamingWasInterrupted = false
+
 			// Don't create streaming message placeholder yet - wait for actual text chunks
 			// Tool messages will appear first, then streaming message when text starts
 
@@ -351,6 +359,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			isError:     msg.IsError,
 		}
 
+		// Mark that streaming was interrupted only if we have an active streaming message
+		if m.streamingMsg != nil && m.streamingMsg.content != "" {
+			m.streamingWasInterrupted = true
+		}
+
 		// If streaming has started, insert the tool message before the streaming message
 		if m.streamingMsgIndex != -1 {
 			// Insert at the correct position
@@ -374,6 +387,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			content:     msg.Content,
 			isCollapsed: true,
 			isError:     msg.IsError,
+		}
+
+		// Mark that streaming was interrupted only if we have an active streaming message
+		if m.streamingMsg != nil && m.streamingMsg.content != "" {
+			m.streamingWasInterrupted = true
 		}
 
 		// If streaming has started, insert the thought message before the streaming message
@@ -402,6 +420,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.streamingMsg != nil {
+			// If streaming was interrupted and is now resuming, add a newline
+			if m.streamingWasInterrupted {
+				m.streamingMsg.content += "\n\n"
+				m.streamingWasInterrupted = false
+			}
+
 			m.streamingMsg.content += string(msg)
 			// Update the streaming message at its tracked index
 			if m.streamingMsgIndex < len(m.messages) {
@@ -423,6 +447,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamingMsg = nil
 			m.streamingMsgIndex = -1 // Reset the index
 		}
+
+		// Reset the flag
+		m.streamingWasInterrupted = false
 
 		// Note: Tool messages were already added via the toolMessageMsg handler
 		// We only need to process any remaining non-tool messages here

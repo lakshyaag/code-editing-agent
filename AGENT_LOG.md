@@ -1,5 +1,66 @@
 # Agent Development Log
 
+## 2025-01-27: System Prompt Loading & Glob Tool Addition
+
+### 📦 IMPLEMENTED: Embedded System Prompt and File Globbing Tool
+
+**Feature Request**: Load the contents of sys.md into constants and add a glob tool for file pattern matching.
+
+**Implementation Details**:
+
+#### 1. System Prompt Embedding
+**Problem**: The `SystemPrompt` constant in `internal/config/constants.go` was empty and needed to load content from `sys.md`.
+
+**Solution**: Used Go's embed feature to load sys.md at compile time:
+```go
+import _ "embed"
+
+//go:embed ../../../sys.md
+var SystemPrompt string
+```
+
+**Technical Changes**:
+- Changed `SystemPrompt` from `const` to `var` to support embedding
+- Added `//go:embed` directive to load sys.md content at compile time
+- The path `../../../sys.md` is relative to the constants.go file location
+- Content is automatically loaded when the binary is built
+
+#### 2. Glob Tool Implementation
+**Feature**: Added a new tool for finding files using glob patterns.
+
+**Capabilities**:
+- Simple patterns: `*.go`, `*.txt`, `*.json`
+- Recursive patterns: `**/*.go`, `**/*.md`
+- Custom base paths: Can search from specific directories
+- Clean formatted output with file count and paths
+
+**Technical Implementation**:
+- Created `internal/tools/glob.go` with:
+  - `GlobInput` struct for parameters
+  - `GlobDefinition` following agent tool pattern
+  - `Glob` function for execution
+  - Support for both simple glob and recursive `**` patterns
+- Registered in `internal/tools/tools.go` by adding `GlobDefinition`
+
+**Key Features**:
+- **Pattern Matching**: Standard glob patterns plus `**` for recursive search
+- **Path Normalization**: Converts to relative paths for cleaner output
+- **Error Handling**: Graceful handling of invalid patterns
+- **Formatted Output**: Shows match count and file list
+
+**Usage Examples**:
+```json
+{"pattern": "*.go"}                    // All Go files in current directory
+{"pattern": "**/*.md"}                 // All Markdown files recursively
+{"pattern": "*.txt", "path": "docs"}   // Text files in docs directory
+```
+
+**Result**: System prompt now automatically loads from sys.md at compile time, and users have a powerful glob tool for file discovery.
+
+**Build Status**: ✅ Compiles successfully, `go vet` passes
+
+---
+
 ## 2025-01-03: UI Improvements - Tool View Background & Hotkey Enhancement
 
 ### 🎨 ENHANCED: Tool View Background Colors & Ctrl+T Hotkey

@@ -11,5 +11,6 @@ func GetAllTools() []agent.ToolDefinition {
 		WriteFileDefinition,
 		SearchFileDefinition,
 		RunShellCommandDefinition,
+		GlobDefinition,
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
 
 	"agent/internal/config"
 
@@ -249,8 +250,19 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 
 // runInferenceStream handles the AI inference with streaming and tool support
 func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Content) iter.Seq2[*genai.GenerateContentResponse, error] {
-	thinkingBudgetVal := int32(-1)
+	thinkingConfig := &genai.ThinkingConfig{}
 
+	if strings.Contains(a.Model, "gemini-2.5") {
+		thinkingBudgetVal := int32(-1)
+		thinkingConfig = &genai.ThinkingConfig{
+			ThinkingBudget:  &thinkingBudgetVal,
+			IncludeThoughts: true,
+		}
+	} else {
+		thinkingConfig = nil
+	}
+
+	// if model is gemini-2.5 family, then enable thinking, otherwise disable it
 	config := &genai.GenerateContentConfig{
 		Tools: []*genai.Tool{
 			{
@@ -259,10 +271,7 @@ func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Co
 		},
 		MaxOutputTokens:   1024,
 		SystemInstruction: genai.NewContentFromText(config.SystemPrompt, genai.RoleUser),
-		ThinkingConfig: &genai.ThinkingConfig{
-			ThinkingBudget:  &thinkingBudgetVal,
-			IncludeThoughts: true,
-		},
+		ThinkingConfig:    thinkingConfig,
 	}
 
 	return a.client.Models.GenerateContentStream(ctx, a.Model, conversation, config)
