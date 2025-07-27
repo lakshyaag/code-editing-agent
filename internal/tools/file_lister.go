@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"agent/internal/agent"
 	"agent/internal/schema"
@@ -20,21 +21,24 @@ type ListFilesInput struct {
 	IncludeHidden bool   `json:"include_hidden,omitempty" jsonschema_description:"Whether to include hidden files and directories (those starting with a dot). Defaults to false."`
 }
 
-// FileNode represents a single file or directory entry.
+// FileNode represents a single file or directory entry in a tree structure.
 type FileNode struct {
-	Path  string `json:"path"`
-	IsDir bool   `json:"is_dir"`
+	Path         string      `json:"path"`
+	IsDir        bool        `json:"is_dir"`
+	Size         int64       `json:"size,omitempty"`
+	LastModified string      `json:"last_modified,omitempty"`
+	Children     []*FileNode `json:"children,omitempty"`
 }
 
 // ListFilesDefinition provides the list_files tool definition
 var ListFilesDefinition = agent.ToolDefinition{
 	Name:        "list_files",
-	Description: "List files and directories in a given relative directory path. Use this to see the contents of a directory. By default, it lists the current directory non-recursively.",
+	Description: "List files and directories in a tree-like structure for a given relative directory path. Use this to see the contents of a directory. By default, it lists the current directory non-recursively.",
 	InputSchema: schema.GenerateSchema[ListFilesInput](),
 	Function:    ListFiles,
 }
 
-// ListFiles lists files and directories as a flat list
+// ListFiles lists files and directories as a tree
 func ListFiles(input json.RawMessage) (string, error) {
 	var listFilesInput ListFilesInput
 	err := json.Unmarshal(input, &listFilesInput)
@@ -47,6 +51,17 @@ func ListFiles(input json.RawMessage) (string, error) {
 		dir = listFilesInput.Path
 	}
 
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("directory not found: %s", dir)
+		}
+		return "", fmt.Errorf("failed to stat path %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("path is not a directory: %s", dir)
+	}
+
 	maxDepth := 1
 	if listFilesInput.Recursive {
 		if listFilesInput.MaxDepth > 0 {
@@ -56,24 +71,27 @@ func ListFiles(input json.RawMessage) (string, error) {
 		}
 	}
 
-	files, err := listFilesRecursive(dir, 0, maxDepth, listFilesInput.IncludeHidden)
+	root := &FileNode{
+		Path:         dir,
+		IsDir:        true,
+		LastModified: info.ModTime().Format(time.RFC3339),
+	}
+
+	children, err := listFilesRecursive(dir, 0, maxDepth, listFilesInput.IncludeHidden)
 	if err != nil {
 		return "", fmt.Errorf("failed to list files: %w", err)
 	}
+	root.Children = children
 
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Path < files[j].Path
-	})
-
-	result, err := json.MarshalIndent(files, "", "  ")
+	result, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal file list: %w", err)
 	}
 	return string(result), nil
 }
 
-// listFilesRecursive recursively builds a flat list of files and directories.
-func listFilesRecursive(currentPath string, depth, maxDepth int, includeHidden bool) ([]FileNode, error) {
+// listFilesRecursive recursively builds a tree of files and directories.
+func listFilesRecursive(currentPath string, depth, maxDepth int, includeHidden bool) ([]*FileNode, error) {
 	if depth >= maxDepth {
 		return nil, nil
 	}
@@ -83,27 +101,48 @@ func listFilesRecursive(currentPath string, depth, maxDepth int, includeHidden b
 		return nil, err
 	}
 
-	var nodes []FileNode
+	var nodes []*FileNode
 	for _, entry := range entries {
 		name := entry.Name()
 		if !includeHidden && strings.HasPrefix(name, ".") {
 			continue // skip hidden files/dirs
 		}
 
-		fullPath := filepath.Join(currentPath, name)
-		node := FileNode{
-			Path:  fullPath,
-			IsDir: entry.IsDir(),
+		info, err := entry.Info()
+		if err != nil {
+			// Could be a fleeting file, skip it.
+			continue
 		}
-		nodes = append(nodes, node)
+
+		node := &FileNode{
+			Path:         name,
+			IsDir:        entry.IsDir(),
+			LastModified: info.ModTime().Format(time.RFC3339),
+		}
+
+		if !entry.IsDir() {
+			node.Size = info.Size()
+		}
 
 		if entry.IsDir() {
-			children, err := listFilesRecursive(fullPath, depth+1, maxDepth, includeHidden)
+			children, err := listFilesRecursive(filepath.Join(currentPath, name), depth+1, maxDepth, includeHidden)
 			if err != nil {
 				return nil, err
 			}
-			nodes = append(nodes, children...)
+			if children != nil {
+				node.Children = children
+			}
 		}
+		nodes = append(nodes, node)
 	}
+
+	sort.Slice(nodes, func(i, j int) bool {
+		// Sort by type (directories first), then by name
+		if nodes[i].IsDir != nodes[j].IsDir {
+			return nodes[i].IsDir
+		}
+		return nodes[i].Path < nodes[j].Path
+	})
+
 	return nodes, nil
 }
