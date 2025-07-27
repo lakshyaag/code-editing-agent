@@ -123,7 +123,7 @@ func InitialModel(agent *agent.Agent) *model {
 		spinner:            s,
 		agent:              agent,
 		showSpinner:        false,
-		messages:           []message{{mType: agentMessage, content: "Welcome to the AI Agent!"}},
+		messages:           []message{{mType: agentMessage, content: config.WelcomeMessage}},
 		showStatusBar:      true,
 		clickableLines:     make(map[int]int),
 		streamingMsgIndex:  -1, // Initialize to -1 (no streaming message)

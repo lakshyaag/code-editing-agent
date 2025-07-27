@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"iter"
 
+	"agent/internal/config"
+
 	"google.golang.org/genai"
 )
 
@@ -233,7 +235,8 @@ func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Co
 				FunctionDeclarations: a.functions,
 			},
 		},
-		MaxOutputTokens: 1024,
+		MaxOutputTokens:   1024,
+		SystemInstruction: genai.NewContentFromText(config.SystemPrompt, genai.RoleUser),
 	}
 
 	return a.client.Models.GenerateContentStream(ctx, a.Model, conversation, config)
