@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"agent/internal/agent"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -33,9 +33,6 @@ const (
 	streamChunk
 )
 
-// A message to indicate that the agent has finished processing
-type agentResponseMsg []agent.Message
-
 // A message for streaming content chunks
 type streamChunkMsg string
 
@@ -48,21 +45,24 @@ type streamCompleteMsg struct {
 }
 
 type model struct {
-	viewport       viewport.Model
-	textarea       textarea.Model
-	spinner        spinner.Model
-	agent          *agent.Agent
-	err            error
-	showSpinner    bool
-	messages       []message
-	width, height  int
-	showStatusBar  bool
-	clickableLines map[int]int
-	streamingMsg   *message // Current message being streamed
+	viewport          viewport.Model
+	textarea          textarea.Model
+	spinner           spinner.Model
+	agent             *agent.Agent
+	err               error
+	showSpinner       bool
+	messages          []message
+	width, height     int
+	showStatusBar     bool
+	clickableLines    map[int]int
+	streamingMsg      *message // Current message being streamed
+	streamingMsgIndex int      // Index of the streaming message in the messages slice
 	// Channels for real-time streaming
 	streamChunkChan    chan streamChunkMsg
 	toolMessageChan    chan toolMessageMsg
 	streamCompleteChan chan streamCompleteMsg
+	// Markdown renderer for agent messages
+	markdownRenderer *glamour.TermRenderer
 }
 
 func InitialModel(agent *agent.Agent) *model {
@@ -83,6 +83,16 @@ func InitialModel(agent *agent.Agent) *model {
 	vp := viewport.New(80, 20)
 	vp.SetContent("Welcome to the AI Agent!")
 
+	// Initialize markdown renderer with auto-style (dark/light) and appropriate width
+	markdownRenderer, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(78), // Slightly less than viewport width for padding
+	)
+	if err != nil {
+		// Fallback to a simple renderer if there's an error
+		markdownRenderer, _ = glamour.NewTermRenderer()
+	}
+
 	return &model{
 		textarea:           ta,
 		viewport:           vp,
@@ -92,9 +102,11 @@ func InitialModel(agent *agent.Agent) *model {
 		messages:           []message{{mType: agentMessage, content: "Welcome to the AI Agent!"}},
 		showStatusBar:      true,
 		clickableLines:     make(map[int]int),
+		streamingMsgIndex:  -1, // Initialize to -1 (no streaming message)
 		streamChunkChan:    make(chan streamChunkMsg, 100),
 		toolMessageChan:    make(chan toolMessageMsg, 10),
 		streamCompleteChan: make(chan streamCompleteMsg, 1),
+		markdownRenderer:   markdownRenderer,
 	}
 }
 
@@ -121,6 +133,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = m.width
 		m.viewport.Height = m.height - m.textarea.Height() - lipgloss.Height(m.statusBarView())
 		m.textarea.SetWidth(m.width)
+
+		// Update markdown renderer width to match viewport width
+		if m.markdownRenderer != nil {
+			newRenderer, err := glamour.NewTermRenderer(
+				glamour.WithAutoStyle(),
+				glamour.WithWordWrap(m.width-8), // Account for "Agent: " prefix and padding
+			)
+			if err == nil {
+				m.markdownRenderer = newRenderer
+			}
+		}
+
 		m.viewport.SetContent(m.renderConversation())
 		return m, nil
 	case tea.MouseMsg:
@@ -139,6 +163,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyCtrlT:
+			// Unify the state of all tool messages
+			var anyExpanded bool
+			for _, msg := range m.messages {
+				if msg.mType == toolMessage && !msg.isCollapsed {
+					anyExpanded = true
+					break
+				}
+			}
+
+			// If any are expanded, collapse all. Otherwise, expand all.
+			for i, msg := range m.messages {
+				if msg.mType == toolMessage {
+					m.messages[i].isCollapsed = anyExpanded
+				}
+			}
+			m.viewport.SetContent(m.renderConversation())
+			return m, nil
 		case tea.KeyEnter:
 			userInput := m.textarea.Value()
 			if userInput == "" {
@@ -201,12 +243,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	case toolMessageMsg:
 		// Handle tool message immediately
-		m.messages = append(m.messages, message{
+		newToolMsg := message{
 			mType:       toolMessage,
 			content:     msg.Content,
 			isCollapsed: true,
 			isError:     msg.IsError,
-		})
+		}
+
+		// If streaming has started, insert the tool message before the streaming message
+		if m.streamingMsgIndex != -1 {
+			// Insert at the correct position
+			m.messages = append(m.messages[:m.streamingMsgIndex], append([]message{newToolMsg}, m.messages[m.streamingMsgIndex:]...)...)
+			// Update the index of the streaming message
+			m.streamingMsgIndex++
+		} else {
+			// Otherwise, just append
+			m.messages = append(m.messages, newToolMsg)
+		}
+
 		m.viewport.SetContent(m.renderConversation())
 		m.viewport.GotoBottom()
 
@@ -218,13 +272,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.streamingMsg == nil {
 			m.streamingMsg = &message{mType: agentMessage, content: "", isStreaming: true}
 			m.messages = append(m.messages, *m.streamingMsg)
+			m.streamingMsgIndex = len(m.messages) - 1 // Store the actual index
 		}
 
 		if m.streamingMsg != nil {
 			m.streamingMsg.content += string(msg)
-			// Update the last message in the list
-			if len(m.messages) > 0 {
-				m.messages[len(m.messages)-1] = *m.streamingMsg
+			// Update the streaming message at its tracked index
+			if m.streamingMsgIndex < len(m.messages) {
+				m.messages[m.streamingMsgIndex] = *m.streamingMsg
 			}
 			m.viewport.SetContent(m.renderConversation())
 			m.viewport.GotoBottom()
@@ -240,6 +295,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.streamingMsg != nil {
 			m.streamingMsg.isStreaming = false
 			m.streamingMsg = nil
+			m.streamingMsgIndex = -1 // Reset the index
 		}
 
 		// Note: Tool messages were already added via the toolMessageMsg handler
@@ -253,51 +309,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Skip - these were already processed via callback
 				continue
 			}
-		}
-
-		m.viewport.SetContent(m.renderConversation())
-		m.viewport.GotoBottom()
-		return m, nil
-	case agentResponseMsg:
-		m.showSpinner = false
-		m.textarea.Focus()
-
-		// If we were streaming, finalize the streaming message
-		if m.streamingMsg != nil {
-			m.streamingMsg.isStreaming = false
-			m.streamingMsg = nil
-		}
-
-		// Remove the placeholder streaming message if it exists
-		if len(m.messages) > 0 && m.messages[len(m.messages)-1].isStreaming {
-			m.messages = m.messages[:len(m.messages)-1]
-		}
-
-		// Accumulate all stream chunks into one message
-		var accumulatedContent string
-		var hasStreamChunks bool
-
-		for _, agentMsg := range msg {
-			switch agentMsg.Type {
-			case agent.StreamChunk:
-				accumulatedContent += agentMsg.Content
-				hasStreamChunks = true
-			case agent.ToolMessage:
-				m.messages = append(m.messages, message{
-					mType:       toolMessage,
-					content:     agentMsg.Content,
-					isCollapsed: true,
-					isError:     agentMsg.IsError,
-				})
-			}
-		}
-
-		// Add the accumulated streaming content as a single agent message
-		if hasStreamChunks {
-			m.messages = append(m.messages, message{
-				mType:   agentMessage,
-				content: accumulatedContent,
-			})
 		}
 
 		m.viewport.SetContent(m.renderConversation())
@@ -336,94 +347,6 @@ func (m *model) View() string {
 	)
 }
 
-func wrapText(text string, width int) string {
-	return lipgloss.NewStyle().Width(width).Render(text)
-}
-
-func (m *model) renderConversation() string {
-	m.clickableLines = make(map[int]int)
-	var lines []string
-	var currentLine int
-
-	userStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
-	agentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	toolStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	errorToolStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-
-	for i, msg := range m.messages {
-		var renderedBlock string
-		switch msg.mType {
-		case userMessage:
-			prefix := "You: "
-			wrappedContent := wrapText(msg.content, m.viewport.Width-lipgloss.Width(prefix))
-			renderedBlock = lipgloss.JoinHorizontal(lipgloss.Top, userStyle.Render(prefix), wrappedContent)
-		case agentMessage:
-			prefix := "Agent: "
-			style := agentStyle
-			wrappedContent := wrapText(msg.content, m.viewport.Width-lipgloss.Width(prefix))
-			renderedBlock = lipgloss.JoinHorizontal(lipgloss.Top, style.Render(prefix), wrappedContent)
-		case toolMessage:
-			style := toolStyle
-			if msg.isError {
-				style = errorToolStyle
-			}
-
-			// Extract tool name from content for better display
-			lines := strings.Split(msg.content, "\n")
-			toolName := "Tool call"
-			if len(lines) > 0 && strings.Contains(lines[0], "Tool Call:") {
-				toolName = strings.TrimPrefix(lines[0], "🔧 Tool Call: ")
-			}
-
-			if msg.isCollapsed {
-				header := style.Render(fmt.Sprintf("[+] %s", toolName))
-				m.clickableLines[currentLine] = i
-				renderedBlock = header
-			} else {
-				header := style.Render(fmt.Sprintf("[-] %s", toolName))
-				m.clickableLines[currentLine] = i
-				wrappedContent := wrapText(msg.content, m.viewport.Width)
-				renderedBlock = lipgloss.JoinVertical(lipgloss.Left, header, wrappedContent)
-			}
-		}
-		lines = append(lines, renderedBlock)
-		currentLine += lipgloss.Height(renderedBlock)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m *model) statusBarView() string {
-	if !m.showStatusBar {
-		return ""
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = "n/a"
-	}
-
-	modelInfo := fmt.Sprintf("Model: %s", m.agent.Model)
-	cwdInfo := fmt.Sprintf("CWD: %s", cwd)
-
-	// Add token usage information
-	tokenUsage := m.agent.GetTokenUsage()
-	tokenInfo := fmt.Sprintf("Tokens: %d in, %d out, %d total",
-		tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.TotalTokens)
-
-	status := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		lipgloss.NewStyle().Padding(0, 1).Render(modelInfo),
-		lipgloss.NewStyle().Padding(0, 1).Render(cwdInfo),
-		lipgloss.NewStyle().Padding(0, 1).Render(tokenInfo),
-	)
-
-	return lipgloss.NewStyle().
-		Width(m.width).
-		Background(lipgloss.Color("235")).
-		Foreground(lipgloss.Color("250")).
-		Render(status)
-}
-
 func Start(agent *agent.Agent) {
 	m := InitialModel(agent)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -432,11 +355,6 @@ func Start(agent *agent.Agent) {
 		os.Exit(1)
 	}
 }
-
-var (
-	// Lipgloss styles
-	spinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("69"))
-)
 
 // streamingCommand creates a command that starts real-time streaming
 func (m model) streamingCommand(userInput string) tea.Cmd {

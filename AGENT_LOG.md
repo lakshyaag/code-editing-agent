@@ -1,5 +1,39 @@
 # Agent Development Log
 
+## 2025-01-03: UI Improvements - Tool View Background & Hotkey Enhancement
+
+### 🎨 ENHANCED: Tool View Background Colors & Ctrl+T Hotkey
+
+**Issue**: Tool view background colors were not being applied consistently, and the `Ctrl+T` hotkey behavior was inconsistent.
+
+**Problems Identified**:
+1. **Inconsistent Background**: Tool call blocks had patches where the lighter background wasn't applied, especially in code blocks and markdown content
+2. **Complex Renderer**: Custom `glamour` renderer with modified styles was causing conflicts and build issues
+3. **Hotkey Logic**: `Ctrl+T` was inverting states rather than unifying them (toggle behavior was unpredictable)
+
+**Solution - Simplified Styling Architecture**:
+1. **Unified Renderer**: Removed custom tool renderer, now using single `markdownRenderer` for consistency
+2. **Clean Background Application**: Background color applied once at the `lipgloss` level to entire tool block
+3. **Predictable Hotkey**: `Ctrl+T` now checks if any tools are expanded → if yes, collapse all; if none expanded, expand all
+
+**Technical Changes**:
+- **Removed Custom Components**: Deleted `internal/tui/markdown.go` and `toolRenderer` field
+- **Simplified Styles**: Removed `toolRendererStyle` and `neutralStyle` from `styles.go`
+- **Clean Rendering**: `renderToolMessage` now applies `toolBackgroundStyle` once to entire block
+- **Fixed Hotkey Logic**: `Ctrl+T` now provides unified toggle behavior for all tool calls
+
+**UI Improvements**:
+- **Consistent Background**: Tool view now has uniform lighter background (color "237") throughout
+- **Better Visual Separation**: Tool calls stand out clearly from main conversation
+- **Reliable Controls**: `Ctrl+T` hotkey works predictably to show/hide all tool details
+- **Cleaner Code**: Removed redundant styling and simplified rendering pipeline
+
+**Result**: Tool view has consistent visual styling with proper background colors and reliable keyboard controls. The UI feels more polished and integrated.
+
+**Build Status**: ✅ Compiles successfully, `go vet` passes
+
+---
+
 ## 2025-01-03: Tool Message Override Fix + UI Cleanup
 
 ### 🎯 FIXED: Tool messages no longer get overridden by streaming placeholder
