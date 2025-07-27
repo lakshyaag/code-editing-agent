@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"agent/internal/agent"
 	"agent/internal/config"
@@ -33,6 +34,7 @@ const (
 	toolMessage
 	streamChunk
 	thoughtMessage
+	welcomeMessage // Add new message type for welcome
 )
 
 // A message for streaming content chunks
@@ -91,7 +93,7 @@ func InitialModel(agent *agent.Agent) *model {
 	s.Spinner = spinner.Dot
 	s.Style = spinnerStyle
 
-	// Initialize viewport
+	// Initialize viewport with reasonable defaults
 	vp := viewport.New(80, 20)
 
 	// Initialize markdown renderer with auto-style (dark/light) and appropriate width
@@ -124,14 +126,14 @@ func InitialModel(agent *agent.Agent) *model {
 		}
 	}
 
-	return &model{
+	m := &model{
 		textarea:    ta,
 		viewport:    vp,
 		spinner:     s,
 		agent:       agent,
 		showSpinner: false,
 		messages: []message{
-			{mType: agentMessage, content: fmt.Sprintf(config.WelcomeMessage, len(config.SystemPrompt))},
+			{mType: welcomeMessage, content: fmt.Sprintf(config.WelcomeMessage, len(config.SystemPrompt))},
 		},
 		showStatusBar:           true,
 		clickableLines:          make(map[int]int),
@@ -145,11 +147,22 @@ func InitialModel(agent *agent.Agent) *model {
 		selectedModelIndex:      currentModelIndex,
 		availableModels:         availableModels,
 		streamingWasInterrupted: false,
+		width:                   80, // Set initial width
+		height:                  24, // Set initial height
 	}
+
+	// Set initial content
+	m.viewport.SetContent(m.renderConversation())
+
+	return m
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.spinner.Tick)
+	return tea.Batch(
+		textarea.Blink,
+		m.spinner.Tick,
+		tea.WindowSize(), // Request initial window size
+	)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -482,14 +495,21 @@ func (m *model) View() string {
 
 	var taView string
 	if m.showSpinner {
-		spinner := m.spinner.View() + " Agent is thinking..."
-		taView = lipgloss.NewStyle().
-			Width(m.width).
-			Height(m.textarea.Height()).
-			Align(lipgloss.Center, lipgloss.Center).
-			Render(spinner)
+		// Create a centered spinner with modern styling
+		spinner := m.spinner.View() + " Processing your request..."
+		taView = textInputContainerStyle.
+			Width(m.width - 4).
+			Render(
+				lipgloss.NewStyle().
+					Width(m.width-12). // Account for container padding
+					Align(lipgloss.Center, lipgloss.Center).
+					Render(spinner),
+			)
 	} else {
-		taView = m.textarea.View()
+		// Style the textarea with the modern container
+		taView = textInputContainerStyle.
+			Width(m.width - 4).
+			Render(m.textarea.View())
 	}
 
 	mainView := lipgloss.JoinVertical(
@@ -556,68 +576,74 @@ type streamStartMsg struct {
 	userInput string
 }
 
-// renderModelSelector renders the model selection overlay
+// renderModelSelector renders the model selection overlay with modern styling
 func (m *model) renderModelSelector(background string) string {
-	// Create the model selector box
-	selectorStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("86")).
-		Padding(1, 2).
-		Background(lipgloss.Color("235"))
-
-	titleStyle := lipgloss.NewStyle().
+	// Create title with icon
+	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("86")).
-		MarginBottom(1)
-
-	title := titleStyle.Render("Select Model (↑/↓ to navigate, Enter to select, Esc to cancel)")
+		Foreground(primaryColor).
+		MarginBottom(2).
+		Render("🔮 Select AI Model")
 
 	// Build the model list
 	var modelItems []string
 	for i, modelName := range m.availableModels {
-		itemStyle := lipgloss.NewStyle().Padding(0, 1)
-		if i == m.selectedModelIndex {
-			// Highlight the selected model
-			itemStyle = itemStyle.
-				Background(lipgloss.Color("86")).
-				Foreground(lipgloss.Color("235")).
-				Bold(true)
-		}
+		var itemStyle lipgloss.Style
+		var prefix string
 
-		// Add indicator for current model
-		indicator := "  "
+		// Check if this is the current model
 		if modelName == m.agent.Model {
-			indicator = "• "
+			prefix = "• "
+		} else {
+			prefix = "  "
 		}
 
-		modelItems = append(modelItems, itemStyle.Render(indicator+modelName))
+		// Apply selection styling
+		if i == m.selectedModelIndex {
+			itemStyle = modelItemSelectedStyle
+		} else {
+			itemStyle = modelItemStyle
+		}
+
+		// Format model name with capabilities hint
+		modelDisplay := modelName
+		if strings.Contains(modelName, "pro") {
+			modelDisplay += " (Advanced)"
+		} else if strings.Contains(modelName, "flash-lite") {
+			modelDisplay += " (Fast & Light)"
+		} else if strings.Contains(modelName, "flash") {
+			modelDisplay += " (Fast)"
+		}
+
+		modelItems = append(modelItems, itemStyle.Render(prefix+modelDisplay))
 	}
 
 	modelList := lipgloss.JoinVertical(lipgloss.Left, modelItems...)
-	content := lipgloss.JoinVertical(lipgloss.Left, title, modelList)
 
-	// Add help text at the bottom
-	helpStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")).
-		MarginTop(1).
-		Italic(true)
+	// Add navigation help
+	navHelp := lipgloss.NewStyle().
+		Foreground(textMuted).
+		MarginTop(2).
+		Align(lipgloss.Center).
+		Render("↑/↓ Navigate • Enter Select • Esc Cancel")
 
-	helpText := helpStyle.Render("F2: Toggle model selector")
-	contentWithHelp := lipgloss.JoinVertical(lipgloss.Left, content, helpText)
+	// Combine all elements
+	content := lipgloss.JoinVertical(
+		lipgloss.Center,
+		title,
+		modelList,
+		navHelp,
+	)
 
-	selectorBox := selectorStyle.Render(contentWithHelp)
-
-	// Create an overlay effect
-	overlayStyle := lipgloss.NewStyle().
-		Width(m.width).
-		Height(m.height)
+	// Apply the modern selector styling
+	selectorBox := modelSelectorStyle.
+		Width(50). // Fixed width for consistency
+		Render(content)
 
 	// Position the selector in the center
-	positionedSelector := lipgloss.Place(
+	return lipgloss.Place(
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		selectorBox,
 	)
-
-	return overlayStyle.Render(positionedSelector)
 }
