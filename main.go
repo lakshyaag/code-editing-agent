@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -9,6 +8,7 @@ import (
 	"agent/internal/agent"
 	"agent/internal/config"
 	"agent/internal/tools"
+	"agent/internal/tui"
 )
 
 func main() {
@@ -27,24 +27,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set up user input scanner
-	scanner := bufio.NewScanner(os.Stdin)
-	getUserMessage := func() (string, bool) {
-		if !scanner.Scan() {
-			return "", false
-		}
-		return scanner.Text(), true
-	}
-
 	// Get all available tools
 	availableTools := tools.GetAllTools()
 
-	// Create and run the agent
-	codeAgent := agent.New(client, cfg.Model, getUserMessage, availableTools)
-
-	err = codeAgent.Run(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
-		os.Exit(1)
-	}
+	// Create and run the agent in TUI mode
+	tuiAgent := agent.New(client, cfg.Model, availableTools)
+	tui.Start(tuiAgent)
 }

@@ -4,17 +4,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"google.golang.org/genai"
 )
 
+type (
+	MessageType int
+	Message     struct {
+		Type    MessageType
+		Content string
+		IsError bool
+	}
+)
+
+const (
+	UserMessage MessageType = iota
+	AgentMessage
+	ToolMessage
+)
+
 // Agent represents the main AI agent that can execute tools
 type Agent struct {
-	client         *genai.Client
-	model          string
-	getUserMessage func() (string, bool)
-	tools          []ToolDefinition
+	client       *genai.Client
+	Model        string
+	tools        []ToolDefinition
+	Conversation []*genai.Content
 }
 
 // ToolDefinition defines the structure for a tool that the agent can use
@@ -26,50 +40,33 @@ type ToolDefinition struct {
 }
 
 // New creates a new Agent instance
-func New(client *genai.Client, model string, getUserMessage func() (string, bool), tools []ToolDefinition) *Agent {
+func New(client *genai.Client, model string, tools []ToolDefinition) *Agent {
 	return &Agent{
-		client:         client,
-		model:          model,
-		getUserMessage: getUserMessage,
-		tools:          tools,
+		client: client,
+		Model:  model,
+		tools:  tools,
 	}
 }
 
-// Run starts the main conversation loop
-func (a *Agent) Run(ctx context.Context) error {
-	conversation := []*genai.Content{}
+// ProcessMessage handles a single user message and returns the agent's response
+func (a *Agent) ProcessMessage(ctx context.Context, userInput string) ([]Message, error) {
+	messages := []Message{}
+	userMessageContent := &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{
+			{Text: userInput},
+		},
+	}
+	a.Conversation = append(a.Conversation, userMessageContent)
 
-	fmt.Printf("Chat with CLI\n")
-	cwd := getCurrentWorkingDirectory()
-	fmt.Printf("Current working directory: %s\n", cwd)
-	fmt.Printf("Using model: %s\n", a.model)
-
-	readUserInput := true
 	for {
-		if readUserInput {
-			fmt.Print("\u001b[94mYou\u001b[0m: ")
-			userInput, ok := a.getUserMessage()
-
-			if !ok {
-				break
-			}
-
-			userMessage := &genai.Content{
-				Role: "user",
-				Parts: []*genai.Part{
-					{Text: userInput},
-				},
-			}
-			conversation = append(conversation, userMessage)
-		}
-
-		response, err := a.runInference(ctx, conversation)
+		response, err := a.runInference(ctx, a.Conversation)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if len(response.Candidates) == 0 {
-			return fmt.Errorf("no response candidates from Gemini")
+			return nil, fmt.Errorf("no response candidates from Gemini")
 		}
 
 		candidate := response.Candidates[0]
@@ -79,7 +76,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			Role:  "model",
 			Parts: candidate.Content.Parts,
 		}
-		conversation = append(conversation, aiContent)
+		a.Conversation = append(a.Conversation, aiContent)
 
 		// Check for function calls
 		if len(candidate.Content.Parts) > 0 {
@@ -89,7 +86,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			for _, part := range candidate.Content.Parts {
 				if part.FunctionCall != nil {
 					hasToolCalls = true
-					result := a.executeTool(part.FunctionCall.Name, part.FunctionCall.Args)
+					result, isError := a.executeTool(part.FunctionCall.Name, part.FunctionCall.Args)
+					messages = append(messages, Message{Type: ToolMessage, Content: result, IsError: isError})
 					toolResults = append(toolResults, &genai.Part{
 						FunctionResponse: &genai.FunctionResponse{
 							Name:     part.FunctionCall.Name,
@@ -105,21 +103,20 @@ func (a *Agent) Run(ctx context.Context) error {
 					Role:  "user",
 					Parts: toolResults,
 				}
-				conversation = append(conversation, toolContent)
-				readUserInput = false
+				a.Conversation = append(a.Conversation, toolContent)
 				continue
 			}
 		}
 
-		// Display text response
+		// Return text response
 		for _, part := range candidate.Content.Parts {
 			if part.Text != "" {
-				fmt.Printf("\u001b[94mCodeAgent\u001b[0m: %s\n", part.Text)
+				messages = append(messages, Message{Type: AgentMessage, Content: part.Text})
+				return messages, nil
 			}
 		}
-		readUserInput = true
+		return messages, nil // Should not be reached
 	}
-	return nil
 }
 
 // runInference handles the AI inference with tool support
@@ -155,11 +152,11 @@ func (a *Agent) runInference(ctx context.Context, conversation []*genai.Content)
 		MaxOutputTokens: 1024,
 	}
 
-	return a.client.Models.GenerateContent(ctx, a.model, conversation, config)
+	return a.client.Models.GenerateContent(ctx, a.Model, conversation, config)
 }
 
 // executeTool executes a specific tool by name with given arguments
-func (a *Agent) executeTool(name string, args map[string]interface{}) string {
+func (a *Agent) executeTool(name string, args map[string]interface{}) (string, bool) {
 	var toolDef ToolDefinition
 	var found bool
 
@@ -171,13 +168,13 @@ func (a *Agent) executeTool(name string, args map[string]interface{}) string {
 		}
 	}
 	if !found {
-		return fmt.Sprintf("Tool %s not found", name)
+		return fmt.Sprintf("Tool %s not found", name), true
 	}
 
 	// Convert args to JSON
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
-		return fmt.Sprintf("Error marshaling arguments: %v", err)
+		return fmt.Sprintf("Error marshaling arguments: %v", err), true
 	}
 
 	fmt.Printf("\u001b[92mtool\u001b[0m: %s(%s)\n", name, string(argsJSON))
@@ -185,17 +182,9 @@ func (a *Agent) executeTool(name string, args map[string]interface{}) string {
 	result, err := toolDef.Function(argsJSON)
 	if err != nil {
 		result = fmt.Sprintf("Error executing tool %s: %v", name, err)
+		return result, true
 	}
 
 	fmt.Printf("\u001b[92mresult\u001b[0m: %s\n", result)
-	return result
-}
-
-// getCurrentWorkingDirectory returns the current working directory or a default message
-func getCurrentWorkingDirectory() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "Failed to get current working directory"
-	}
-	return cwd
+	return result, false
 }
