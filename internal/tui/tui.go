@@ -47,7 +47,7 @@ type UIState struct {
 	showSpinner    bool
 	showStatusBar  bool
 	clickableLines map[int]int
-	
+
 	// Modal states
 	modelSelectionMode   bool
 	selectedModelIndex   int
@@ -61,24 +61,24 @@ type StreamState struct {
 	streamingMsg            *message
 	streamingMsgIndex       int
 	streamingWasInterrupted bool
-	
+
 	// Context management
 	cancelFunc context.CancelFunc
-	
+
 	// Channels
-	streamChunkChan    chan streamChunkMsg
-	toolMessageChan    chan toolMessageMsg
-	thoughtMessageChan chan thoughtMessageMsg
-	streamCompleteChan chan streamCompleteMsg
+	streamChunkChan          chan streamChunkMsg
+	toolMessageChan          chan toolMessageMsg
+	thoughtMessageChan       chan thoughtMessageMsg
+	streamCompleteChan       chan streamCompleteMsg
 	toolConfirmationChan     chan toolConfirmationRequestMsg
 	confirmationResponseChan chan bool
 }
 
 // AppConfig groups application configuration
 type AppConfig struct {
-	agent               *agent.Agent
-	availableModels     []string
-	markdownRenderer    *glamour.TermRenderer
+	agent                   *agent.Agent
+	availableModels         []string
+	markdownRenderer        *glamour.TermRenderer
 	requireToolConfirmation bool
 	enableThinkingMode      bool
 }
@@ -111,7 +111,7 @@ func InitialModel(agent *agent.Agent) *model {
 
 	// Initialize markdown renderer with auto-style (dark/light) and appropriate width
 	markdownRenderer, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStylePath("dark"),
 		glamour.WithWordWrap(78), // Slightly less than viewport width for padding
 	)
 	if err != nil {
@@ -150,16 +150,16 @@ func InitialModel(agent *agent.Agent) *model {
 
 	m := &model{
 		ui: UIState{
-			textarea:           ta,
-			viewport:           vp,
-			spinner:            s,
-			showSpinner:        false,
-			showStatusBar:      true,
-			clickableLines:     make(map[int]int),
-			modelSelectionMode: false,
-			selectedModelIndex: currentModelIndex,
-			width:              80,
-			height:             24,
+			textarea:             ta,
+			viewport:             vp,
+			spinner:              s,
+			showSpinner:          false,
+			showStatusBar:        true,
+			clickableLines:       make(map[int]int),
+			modelSelectionMode:   false,
+			selectedModelIndex:   currentModelIndex,
+			width:                80,
+			height:               24,
 			toolConfirmationMode: false,
 		},
 		stream: StreamState{
@@ -248,7 +248,7 @@ func (m *model) handleWindowResize(msg tea.WindowSizeMsg) tea.Cmd {
 	// Update markdown renderer width to match viewport width
 	if m.config.markdownRenderer != nil {
 		newRenderer, err := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
+			glamour.WithStylePath("dark"),
 			glamour.WithWordWrap(m.ui.width-8), // Account for "Agent: " prefix and padding
 		)
 		if err == nil {
@@ -500,31 +500,31 @@ func (m *model) handleStreamStart(msg streamStartMsg) tea.Cmd {
 	if m.stream.cancelFunc != nil {
 		m.stream.cancelFunc()
 	}
-	
+
 	// Create a new context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	m.stream.cancelFunc = cancel
-	
+
 	// Start the real-time streaming process
 	go func() {
 		defer cancel() // Ensure cleanup
-		
+
 		// Message queue to handle ordering
 		messageQueue := make([]interface{}, 0)
 		queueMutex := &sync.Mutex{}
-		
+
 		// Helper to safely queue messages
 		queueMessage := func(msg interface{}) {
 			queueMutex.Lock()
 			messageQueue = append(messageQueue, msg)
 			queueMutex.Unlock()
 		}
-		
+
 		// Helper to send queued messages
 		sendQueuedMessages := func() {
 			queueMutex.Lock()
 			defer queueMutex.Unlock()
-			
+
 			for _, qMsg := range messageQueue {
 				switch msg := qMsg.(type) {
 				case streamChunkMsg:
@@ -549,7 +549,7 @@ func (m *model) handleStreamStart(msg streamStartMsg) tea.Cmd {
 			}
 			messageQueue = messageQueue[:0] // Clear queue
 		}
-		
+
 		// Call the agent's ProcessMessage for streaming with tool callback
 		response, err := m.config.agent.ProcessMessage(ctx, msg.userInput,
 			// Text callback for streaming chunks
@@ -746,7 +746,7 @@ func (m *model) handleStreamChunk(msg streamChunkMsg) tea.Cmd {
 			m.messages[m.stream.streamingMsgIndex] = *m.stream.streamingMsg
 		}
 	}
-	
+
 	// Batch frequent updates to avoid overwhelming the renderer
 	// This helps keep the event loop fast for streaming content
 	return tea.Batch(
