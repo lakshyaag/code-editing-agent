@@ -1,23 +1,34 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
+	"agent/internal/config"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// renderConversation renders all messages in the conversation with modern styling
+// renderConversation renders all messages in the conversation
 func (m *model) renderConversation() string {
-	m.clickableLines = make(map[int]int)
+	// Ensure we have a valid viewport width
+	if m.ui.viewport.Width <= 0 {
+		return "" // Don't render until we have window dimensions
+	}
+
+	m.ui.clickableLines = make(map[int]int)
 	var lines []string
 	var currentLine int
 
-	// Add some top padding
-	lines = append(lines, "")
-	currentLine++
+	// Welcome header if no messages
+	if len(m.messages) == 0 {
+		welcomeHeader := m.renderWelcomeHeader()
+		lines = append(lines, welcomeHeader, "")
+		currentLine += lipgloss.Height(welcomeHeader) + 1
+	}
 
+	// Render messages
 	for i, msg := range m.messages {
 		var renderedBlock string
 		switch msg.mType {
@@ -25,345 +36,338 @@ func (m *model) renderConversation() string {
 			renderedBlock = m.renderUserMessage(msg)
 		case agentMessage:
 			renderedBlock = m.renderAgentMessage(msg)
-		case toolMessage:
-			renderedBlock = m.renderToolMessage(msg, i, &currentLine)
-		case thoughtMessage:
-			renderedBlock = m.renderThoughtMessage(msg, i, &currentLine)
-		case welcomeMessage:
-			renderedBlock = m.renderWelcomeMessage(msg)
+		case toolMessage, thoughtMessage:
+			renderedBlock = m.renderCollapsibleMessage(msg, i, &currentLine)
 		}
 		lines = append(lines, renderedBlock)
 		currentLine += lipgloss.Height(renderedBlock)
 	}
 
-	// Add some bottom padding
-	lines = append(lines, "")
-
 	return strings.Join(lines, "\n")
 }
 
-// renderUserMessage renders a user message with modern card styling
+// renderUserMessage renders a user message
 func (m *model) renderUserMessage(msg message) string {
-	// Create header with icon and label
-	header := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		userLabelStyle.Render(userIcon+" You"),
-	)
+	header := labelStyle.Copy().
+		Foreground(primaryColor).
+		Render(userIcon + " You")
 
-	// Render markdown content
-	var content string
-	renderedMarkdown, err := m.markdownRenderer.Render(msg.content)
-	if err != nil {
-		content = msg.content
-	} else {
-		content = strings.TrimRight(renderedMarkdown, "\n")
-	}
-
-	// Apply text color styling to content
-	styledContent := lipgloss.NewStyle().
-		Foreground(textSecondary).
-		Width(m.viewport.Width - 10). // Account for card padding and borders
-		Render(content)
-
-	// Combine header and content
-	messageContent := lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		styledContent,
-	)
-
-	// Apply card styling
-	return userMessageStyle.
-		Width(m.viewport.Width - 4). // Account for viewport margins
-		Render(messageContent)
+	content := m.renderMarkdown(msg.content)
+	
+	return cardStyle.Copy().
+		BorderForeground(primaryColor).
+		Width(m.ui.viewport.Width - 4).
+		Render(header + "\n" + content)
 }
 
-// renderAgentMessage renders an agent message with modern card styling
+// renderAgentMessage renders an agent message
 func (m *model) renderAgentMessage(msg message) string {
-	// Create header with icon and label
-	header := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		agentLabelStyle.Render(agentIcon+" Assistant"),
-	)
+	header := labelStyle.Copy().
+		Foreground(secondaryColor).
+		Render(agentIcon + " Assistant")
 
-	// Add streaming indicator if message is still streaming
 	if msg.isStreaming {
-		streamIndicator := streamingIndicatorStyle.Render(" ●")
-		header = lipgloss.JoinHorizontal(lipgloss.Top, header, streamIndicator)
+		header += lipgloss.NewStyle().
+			Foreground(secondaryColor).
+			Blink(true).
+			Render(" ●")
 	}
 
-	// Render markdown content
-	var content string
-	renderedMarkdown, err := m.markdownRenderer.Render(msg.content)
-	if err != nil {
-		content = msg.content
+	content := m.renderMarkdown(msg.content)
+	
+	return cardStyle.Copy().
+		BorderForeground(secondaryColor).
+		Width(m.ui.viewport.Width - 4).
+		Render(header + "\n" + content)
+}
+
+// renderCollapsibleMessage renders tool or thought messages with collapse functionality
+func (m *model) renderCollapsibleMessage(msg message, index int, currentLine *int) string {
+	// Determine icon and header text
+	icon := toolIcon
+	headerText := "Tool Call"
+	isThought := msg.mType == thoughtMessage
+	
+	if isThought {
+		icon = thoughtIcon
+		headerText = "Thinking..."
+	} else if strings.Contains(msg.content, "Tool Call:") {
+		lines := strings.Split(msg.content, "\n")
+		if len(lines) > 0 {
+			headerText = strings.TrimPrefix(lines[0], "🔧 Tool Call: ")
+		}
+	}
+
+	// Create header
+	eIcon := collapseIcon
+	if !msg.isCollapsed {
+		eIcon = expandIcon
+	}
+	
+	statusIcon := ""
+	if !isThought && msg.isError {
+		statusIcon = "✗ "
+	} else if !isThought && !msg.isError {
+		statusIcon = "✓ "
+	}
+
+	headerContent := fmt.Sprintf("%s %s %s%s", eIcon, icon, statusIcon, headerText)
+	
+	headerStyle := collapsibleHeaderStyle.Copy()
+	if msg.isError {
+		headerStyle = headerStyle.Foreground(errorColor)
+	} else if !isThought {
+		headerStyle = headerStyle.Foreground(accentColor)
 	} else {
-		content = strings.TrimRight(renderedMarkdown, "\n")
+		headerStyle = headerStyle.Foreground(textMuted).Italic(true)
 	}
 
-	// Apply text color styling to content
-	styledContent := lipgloss.NewStyle().
-		Foreground(textSecondary).
-		Width(m.viewport.Width - 10). // Account for card padding and borders
+	header := headerStyle.
+		Width(m.ui.viewport.Width - 6).
+		Render(headerContent)
+
+	// Make header clickable
+	m.ui.clickableLines[*currentLine] = index
+
+	cardStyleToUse := collapsibleCardStyle.Copy()
+	if isThought {
+		cardStyleToUse = cardStyleToUse.BorderStyle(lipgloss.DoubleBorder())
+	}
+
+	if msg.isCollapsed {
+		return cardStyleToUse.
+			Width(m.ui.viewport.Width - 4).
+			Render(header)
+	}
+
+	// Render expanded content
+	var content string
+	if isThought {
+		content = strings.TrimPrefix(msg.content, "💭 Thinking: ")
+		content = m.renderMarkdown(content)
+	} else {
+		content = m.renderMarkdown(formatToolContent(msg.content))
+	}
+
+	contentStyle := collapsibleContentStyle.Copy()
+	if isThought {
+		contentStyle = contentStyle.Italic(true)
+	}
+
+	styledContent := contentStyle.
+		Width(m.ui.viewport.Width - 10).
 		Render(content)
 
-	// Combine header and content
-	messageContent := lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		styledContent,
-	)
-
-	// Apply card styling
-	return agentMessageStyle.
-		Width(m.viewport.Width - 4). // Account for viewport margins
-		Render(messageContent)
+	return cardStyleToUse.
+		Width(m.ui.viewport.Width - 4).
+		Render(header + "\n" + styledContent)
 }
 
-// renderToolMessage renders a tool call message with collapsible content
-func (m *model) renderToolMessage(msg message, index int, currentLine *int) string {
-	// Parse tool content
-	lines := strings.Split(msg.content, "\n")
-	toolName := "Tool Call"
-	if len(lines) > 0 && strings.Contains(lines[0], "Tool Call:") {
-		toolName = strings.TrimPrefix(lines[0], "🔧 Tool Call: ")
+// renderMarkdown renders markdown content
+func (m *model) renderMarkdown(content string) string {
+	if m.config.markdownRenderer == nil {
+		return content
 	}
-
-	// Create header with expand/collapse icon, status icon, and tool name
-	statusIcon := getStatusIcon(msg.isError)
-	expandIcon := getExpandCollapseIcon(msg.isCollapsed)
-
-	headerContent := fmt.Sprintf("%s %s %s %s", expandIcon, toolIcon, statusIcon, toolName)
-
-	// Apply error styling if needed
-	var headerStyleToUse lipgloss.Style
-	if msg.isError {
-		headerStyleToUse = toolHeaderStyle.Copy().Foreground(errorColor)
-	} else {
-		headerStyleToUse = toolHeaderStyle.Copy().Foreground(accentColor)
-	}
-
-	header := headerStyleToUse.
-		Width(m.viewport.Width - 6). // Account for borders
-		Render(headerContent)
-
-	// Make header clickable
-	m.clickableLines[*currentLine] = index
-
-	if msg.isCollapsed {
-		// Return just the header in a card
-		return toolMessageStyle.
-			Width(m.viewport.Width - 4).
-			Render(header)
-	}
-
-	// Format and render the expanded content
-	formattedContent := formatToolContent(msg.content)
-	renderedContent, err := m.markdownRenderer.Render(formattedContent)
+	
+	rendered, err := m.config.markdownRenderer.Render(content)
 	if err != nil {
-		renderedContent = msg.content
-	} else {
-		renderedContent = strings.TrimRight(renderedContent, "\n")
+		return content
 	}
-
-	// Style the content
-	styledContent := toolContentStyle.
-		Width(m.viewport.Width - 10).
-		Render(renderedContent)
-
-	// Combine header and content
-	fullContent := lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		styledContent,
-	)
-
-	// Apply card styling
-	return toolMessageStyle.
-		Width(m.viewport.Width - 4).
-		Render(fullContent)
+	return strings.TrimRight(rendered, "\n")
 }
 
-// renderThoughtMessage renders a thought message with collapsible content
-func (m *model) renderThoughtMessage(msg message, index int, currentLine *int) string {
-	// Create header with expand/collapse icon and thought indicator
-	expandIcon := getExpandCollapseIcon(msg.isCollapsed)
-	headerContent := fmt.Sprintf("%s %s Thinking...", expandIcon, thoughtIcon)
-
-	header := thoughtHeaderStyle.
-		Width(m.viewport.Width - 6). // Account for borders
-		Render(headerContent)
-
-	// Make header clickable
-	m.clickableLines[*currentLine] = index
-
-	if msg.isCollapsed {
-		// Return just the header in a card
-		return thoughtMessageStyle.
-			Width(m.viewport.Width - 4).
-			Render(header)
+// renderWelcomeHeader renders the welcome message header
+func (m *model) renderWelcomeHeader() string {
+	// Ensure minimum width
+	width := m.ui.viewport.Width - 4
+	if width < 60 {
+		width = 60
 	}
 
-	// Extract and render the thought content
-	content := strings.TrimPrefix(msg.content, "💭 Thinking: ")
-	renderedContent, err := m.markdownRenderer.Render(content)
-	if err != nil {
-		renderedContent = content
-	} else {
-		renderedContent = strings.TrimRight(renderedContent, "\n")
-	}
-
-	// Style the content
-	styledContent := thoughtContentStyle.
-		Width(m.viewport.Width - 10).
-		Render(renderedContent)
-
-	// Combine header and content
-	fullContent := lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		styledContent,
-	)
-
-	// Apply card styling
-	return thoughtMessageStyle.
-		Width(m.viewport.Width - 4).
-		Render(fullContent)
-}
-
-// statusBarView renders the status bar with modern styling
-func (m *model) statusBarView() string {
-	if !m.showStatusBar {
-		return ""
-	}
-
-	// Get current working directory
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = "n/a"
-	}
-
-	// Truncate CWD if too long
-	maxCwdLen := 30
-	if len(cwd) > maxCwdLen {
-		cwd = "..." + cwd[len(cwd)-maxCwdLen+3:]
-	}
-
-	// Build status items with icons
-	modelInfo := statusItemStyle.Render(fmt.Sprintf("🔮 %s", m.agent.Model))
-	cwdInfo := statusItemStyle.Render(fmt.Sprintf("📁 %s", cwd))
-
-	// Token usage with color coding and description
-	tokenUsage := m.agent.GetTokenUsage()
-	tokenStyle := statusItemStyle.Copy()
-	tokenDescription := "Tokens"
-
-	// Add warning if approaching limits
-	if tokenUsage.TotalTokens > 500000 {
-		tokenStyle = tokenStyle.Foreground(errorColor)
-		tokenDescription = "Tokens (High!)"
-	} else if tokenUsage.TotalTokens > 1000000 {
-		tokenStyle = tokenStyle.Foreground(warningColor)
-		tokenDescription = "Tokens (Moderate)"
-	}
-
-	tokenInfo := tokenStyle.Render(fmt.Sprintf("🪙 %s: %d in / %d out",
-		tokenDescription, tokenUsage.InputTokens, tokenUsage.OutputTokens))
-
-	// Add help text
-	confirmStatus := ""
-	if m.requireToolConfirmation {
-		confirmStatus = " (Confirm: ON)"
-	} else {
-		confirmStatus = " (Confirm: OFF)"
-	}
-
-	var helpInfo string
-	if m.toolConfirmationMode {
-		helpInfo = lipgloss.NewStyle().
-			Foreground(warningColor).
-			Bold(true).
-			Render("Y: Confirm | N/Esc: Deny")
-	} else if m.modelSelectionMode {
-		helpInfo = lipgloss.NewStyle().
-			Foreground(primaryColor).
-			Render("↑↓ Navigate • Enter Select • Esc Cancel")
-	} else {
-		helpInfo = lipgloss.NewStyle().
-			Foreground(textMuted).
-			Render(fmt.Sprintf("F2 Model • F3 Tool Confirm%s • Ctrl+T Toggle • Ctrl+C Exit", confirmStatus))
-	}
-
-	// Combine all status items
-	leftStatus := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		modelInfo,
-		cwdInfo,
-		tokenInfo,
-	)
-
-	// Use the full width and align help text to the right
-	fullStatus := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		leftStatus,
-		lipgloss.NewStyle().
-			Width(m.width-lipgloss.Width(leftStatus)-lipgloss.Width(helpInfo)-4).
-			Render(" "),
-		helpInfo,
-	)
-
-	return statusBarStyle.
-		Width(m.width).
-		Render(fullStatus)
-}
-
-// renderWelcomeMessage renders the welcome message with a special header
-func (m *model) renderWelcomeMessage(msg message) string {
-	// Create header with welcome icon and title
 	header := lipgloss.NewStyle().
 		Foreground(accentColor).
 		Bold(true).
 		Render("🎉 Welcome to CLI Code Assistant")
 
-	// Split content into lines for better control
-	lines := strings.Split(msg.content, "\n")
-	var styledLines []string
-
-	// Style each line separately
+	welcomeContent := fmt.Sprintf(config.WelcomeMessage, len(config.SystemPrompt))
+	
+	// Apply word wrapping to content before rendering
 	contentStyle := lipgloss.NewStyle().
-		Foreground(textSecondary)
+		Foreground(textMuted).
+		Width(width - 6). // Account for card padding
+		Render(welcomeContent)
 
-	for _, line := range lines {
-		if line != "" {
-			styledLines = append(styledLines, contentStyle.Render(line))
-		} else {
-			styledLines = append(styledLines, "") // Preserve empty lines
-		}
+	// Combine with newlines for proper spacing
+	fullContent := header + "\n\n" + contentStyle
+
+	return cardStyle.Copy().
+		BorderForeground(accentColor).
+		BorderStyle(lipgloss.DoubleBorder()).
+		Width(width).
+		Render(fullContent)
+}
+
+// statusBarView renders the status bar
+func (m *model) statusBarView() string {
+	if !m.ui.showStatusBar {
+		return ""
 	}
 
-	// Join the styled content
-	styledContent := strings.Join(styledLines, "\n")
+	// Get current working directory
+	cwd, _ := os.Getwd()
+	if len(cwd) > 30 {
+		cwd = "..." + cwd[len(cwd)-27:]
+	}
 
-	// Combine header and content with proper spacing
-	messageContent := lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		"", // Add a blank line for spacing
-		styledContent,
+	// Build status items
+	items := []string{
+		fmt.Sprintf("🔮 %s", m.config.agent.Model),
+		fmt.Sprintf("📁 %s", cwd),
+	}
+
+	// Token usage
+	tokenUsage := m.config.agent.GetTokenUsage()
+	tokenText := fmt.Sprintf("🪙 %d/%d", tokenUsage.InputTokens, tokenUsage.OutputTokens)
+	if tokenUsage.TotalTokens > 500000 {
+		tokenText = lipgloss.NewStyle().Foreground(errorColor).Render(tokenText)
+	}
+	items = append(items, tokenText)
+
+	// Help text based on mode
+	var helpText string
+	if m.ui.toolConfirmationMode {
+		helpText = lipgloss.NewStyle().
+			Foreground(warningColor).
+			Bold(true).
+			Render("Y: Confirm | N/Esc: Deny")
+	} else if m.ui.modelSelectionMode {
+		helpText = "↑↓ Navigate • Enter Select • Esc Cancel"
+	} else {
+		confirmStatus := "OFF"
+		if m.config.requireToolConfirmation {
+			confirmStatus = "ON"
+		}
+		thinkStatus := "OFF"
+		if m.config.enableThinkingMode {
+			thinkStatus = "ON"
+		}
+		helpText = fmt.Sprintf("F2 Model • F3 Confirm:%s • F4 Think:%s • Ctrl+C Exit", confirmStatus, thinkStatus)
+	}
+
+	// Join items
+	leftStatus := lipgloss.NewStyle().
+		Foreground(textMuted).
+		Render(strings.Join(items, " • "))
+
+	// Calculate spacing
+	spacerWidth := m.ui.width - lipgloss.Width(leftStatus) - lipgloss.Width(helpText) - 4
+	if spacerWidth < 0 {
+		spacerWidth = 1
+	}
+	spacer := strings.Repeat(" ", spacerWidth)
+
+	return statusBarStyle.
+		Width(m.ui.width).
+		Render(leftStatus + spacer + helpText)
+}
+
+// renderModelSelector renders the model selection overlay
+func (m *model) renderModelSelector(background string) string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(primaryColor).
+		MarginBottom(2).
+		Render("🔮 Select AI Model")
+
+	// Build model list
+	var modelItems []string
+	for i, modelName := range m.config.availableModels {
+		prefix := "  "
+		if modelName == m.config.agent.Model {
+			prefix = "• "
+		}
+
+		style := normalItemStyle
+		if i == m.ui.selectedModelIndex {
+			style = selectedItemStyle
+		}
+
+		// Add capability hints
+		display := modelName
+		if strings.Contains(modelName, "pro") {
+			display += " (Advanced)"
+		} else if strings.Contains(modelName, "flash-lite") {
+			display += " (Fast & Light)"
+		} else if strings.Contains(modelName, "flash") {
+			display += " (Fast)"
+		}
+
+		modelItems = append(modelItems, style.Render(prefix+display))
+	}
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Center,
+		title,
+		strings.Join(modelItems, "\n"),
+		"\n↑/↓ Navigate • Enter Select • Esc Cancel",
 	)
 
-	// Apply special welcome card styling
-	welcomeCardStyle := messageCardStyle.Copy().
-		BorderForeground(accentColor).
-		BorderStyle(lipgloss.DoubleBorder())
+	return lipgloss.Place(
+		m.ui.width, m.ui.height,
+		lipgloss.Center, lipgloss.Center,
+		modalStyle.Copy().
+			BorderForeground(primaryColor).
+			Width(50).
+			Render(content),
+	)
+}
 
-	// Calculate proper width
-	cardWidth := m.viewport.Width - 4
-	if cardWidth < 40 {
-		cardWidth = 40 // Ensure minimum width
-	}
+// renderToolConfirmation renders the tool confirmation overlay
+func (m *model) renderToolConfirmation(background string) string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(warningColor).
+		Align(lipgloss.Center).
+		Render("⚠️  Tool Execution Request")
 
-	return welcomeCardStyle.
-		Width(cardWidth).
-		Render(messageContent)
+	// Tool info
+	toolInfo := fmt.Sprintf("Tool: %s\n\nArguments:\n", m.ui.toolConfirmationName)
+	argsJSON, _ := json.MarshalIndent(m.ui.toolConfirmationArgs, "", "  ")
+	
+	argsBox := lipgloss.NewStyle().
+		Foreground(secondaryColor).
+		Background(bgDark).
+		Padding(1).
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(bgLight).
+		Render(string(argsJSON))
+
+	// Buttons
+	buttons := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		lipgloss.NewStyle().Background(accentColor).Foreground(bgDark).Bold(true).Padding(0, 2).Render("Y - Yes"),
+		"  ",
+		lipgloss.NewStyle().Background(errorColor).Foreground(textPrimary).Bold(true).Padding(0, 2).Render("N - No"),
+		"  ",
+		lipgloss.NewStyle().Background(bgLight).Foreground(textPrimary).Padding(0, 2).Render("Esc - Cancel"),
+	)
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Center,
+		title,
+		"\n"+toolInfo,
+		argsBox,
+		"\nDo you want to execute this tool?\n",
+		buttons,
+		"\n🔒 Tool execution requires your permission",
+	)
+
+	return lipgloss.Place(
+		m.ui.width, m.ui.height,
+		lipgloss.Center, lipgloss.Center,
+		modalStyle.Copy().
+			BorderForeground(warningColor).
+			Width(60).
+			Render(content),
+	)
 }

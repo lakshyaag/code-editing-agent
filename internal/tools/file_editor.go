@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -31,7 +32,7 @@ The file MUST exist. This tool cannot be used to create new files.
 }
 
 // EditFile edits a file by replacing old_str with new_str
-func EditFile(input json.RawMessage) (string, error) {
+func EditFile(ctx context.Context, input json.RawMessage) (string, error) {
 	var editFileInput EditFileInput
 	err := json.Unmarshal(input, &editFileInput)
 	if err != nil {

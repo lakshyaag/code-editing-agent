@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -38,7 +39,7 @@ It returns the stdout, stderr, and exit code.`,
 }
 
 // RunShellCommand executes a shell command and returns its output.
-func RunShellCommand(input json.RawMessage) (string, error) {
+func RunShellCommand(ctx context.Context, input json.RawMessage) (string, error) {
 	var runShellCommandInput RunShellCommandInput
 	err := json.Unmarshal(input, &runShellCommandInput)
 	if err != nil {

@@ -2,20 +2,13 @@ package tui
 
 import (
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 )
-
-// wrapText wraps text to a specified width using lipgloss
-func wrapText(text string, width int) string {
-	return lipgloss.NewStyle().Width(width).Render(text)
-}
 
 // formatToolContent converts raw tool call content into structured markdown
 func formatToolContent(content string) string {
 	lines := strings.Split(content, "\n")
 	if len(lines) < 3 {
-		return content // Not enough content to format
+		return content
 	}
 
 	var arguments, result string
@@ -28,35 +21,30 @@ func formatToolContent(content string) string {
 			result = strings.TrimPrefix(line, "Result: ")
 			inResult = true
 		} else if inResult && i > 0 {
-			// Multi-line result content
 			result += "\n" + line
 		}
 	}
 
-	// Build lightweight, streamlined markdown
+	// Build markdown
 	var formatted strings.Builder
-
-	// Arguments section
 	formatted.WriteString("**Arguments:**\n")
+	
 	if arguments != "" && arguments != "{}" {
-		formatted.WriteString("```json\n")
-		formatted.WriteString(arguments)
-		formatted.WriteString("\n```\n")
+		formatted.WriteString("```json\n" + arguments + "\n```\n")
 	} else {
 		formatted.WriteString("`None`\n")
 	}
 
-	// Result section with smart formatting
 	formatted.WriteString("\n**Result:**\n")
 	if result != "" {
-		if isStructuredData(result) {
-			formatted.WriteString("```json\n")
-			formatted.WriteString(result)
-			formatted.WriteString("\n```\n")
+		// Detect if it's JSON-like data
+		isJSON := (strings.HasPrefix(result, "{") && strings.HasSuffix(result, "}")) ||
+			(strings.HasPrefix(result, "[") && strings.HasSuffix(result, "]"))
+		
+		if isJSON {
+			formatted.WriteString("```json\n" + result + "\n```\n")
 		} else if strings.Contains(result, "Error:") || strings.Contains(result, "error:") {
-			formatted.WriteString("```\n")
-			formatted.WriteString(result)
-			formatted.WriteString("\n```\n")
+			formatted.WriteString("```\n" + result + "\n```\n")
 		} else {
 			formatted.WriteString(result)
 		}
@@ -65,10 +53,4 @@ func formatToolContent(content string) string {
 	}
 
 	return formatted.String()
-}
-
-// isStructuredData checks if the result contains structured data
-func isStructuredData(result string) bool {
-	return (strings.HasPrefix(result, "{") && strings.HasSuffix(result, "}")) ||
-		(strings.HasPrefix(result, "[") && strings.HasSuffix(result, "]"))
 }

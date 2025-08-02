@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"agent/internal/agent"
 	"agent/internal/schema"
 	"encoding/json"
@@ -25,7 +26,7 @@ var GlobDefinition = agent.ToolDefinition{
 }
 
 // Glob finds files matching a pattern
-func Glob(input json.RawMessage) (string, error) {
+func Glob(ctx context.Context, input json.RawMessage) (string, error) {
 	var params GlobInput
 	if err := json.Unmarshal(input, &params); err != nil {
 		return "", fmt.Errorf("failed to parse input: %w", err)

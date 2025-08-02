@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -26,8 +27,8 @@ var ReadFileDefinition = agent.ToolDefinition{
 	Function:    ReadFile,
 }
 
-// ReadFile reads the contents of a file and returns it as a string
-func ReadFile(input json.RawMessage) (string, error) {
+// ReadFile reads the contents of a file
+func ReadFile(ctx context.Context, input json.RawMessage) (string, error) {
 	var readFileInput ReadFileInput
 	err := json.Unmarshal(input, &readFileInput)
 	if err != nil {
@@ -56,7 +57,7 @@ func ReadFile(input json.RawMessage) (string, error) {
 	}
 
 	if start > end {
-		return "", fmt.Errorf("start_line (%d) cannot be greater than end_line (%d)", start, end)
+		return "", fmt.Errorf("start line %d is greater than end line %d", start, end)
 	}
 
 	if (end - start + 1) > maxLines {

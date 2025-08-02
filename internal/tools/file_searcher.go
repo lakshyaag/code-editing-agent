@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -35,7 +36,7 @@ var SearchFileDefinition = agent.ToolDefinition{
 }
 
 // SearchFile searches for a query string in a file and returns matching lines.
-func SearchFile(input json.RawMessage) (string, error) {
+func SearchFile(ctx context.Context, input json.RawMessage) (string, error) {
 	var searchFileInput SearchFileInput
 	err := json.Unmarshal(input, &searchFileInput)
 	if err != nil {

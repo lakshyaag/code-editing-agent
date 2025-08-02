@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"time"
 
 	"agent/internal/config"
 
@@ -50,6 +51,33 @@ const (
 	ThoughtMessage
 )
 
+// AgentConfig holds configuration for the agent
+type AgentConfig struct {
+	MaxOutputTokens      int32
+	Temperature          float32
+	TopK                 float32  // Changed from int32 to float32
+	TopP                 float32
+	ThinkingBudget       int32 // -1 for unlimited
+	SupportedThinkingModels []string // Models that support thinking mode
+}
+
+// DefaultAgentConfig returns sensible defaults
+func DefaultAgentConfig() *AgentConfig {
+	return &AgentConfig{
+		MaxOutputTokens: 8192, // Increased from 1024 for better responses
+		Temperature:     0.7,
+		TopK:            40,   // This is still valid as a float32
+		TopP:            0.95,
+		ThinkingBudget:  -1, // Unlimited by default
+		SupportedThinkingModels: []string{
+			"gemini-2.5-pro",
+			"gemini-2.5-flash",
+			"gemini-2.5-flash-lite",
+			// Add new models here as they support thinking
+		},
+	}
+}
+
 // Agent represents the main AI agent that can execute tools
 type Agent struct {
 	client       *genai.Client
@@ -58,6 +86,7 @@ type Agent struct {
 	Conversation []*genai.Content
 	TokenUsage   TokenUsage
 	functions    []*genai.FunctionDeclaration // Pre-computed function declarations
+	config       *AgentConfig
 }
 
 // ToolDefinition defines the structure for a tool that the agent can use
@@ -65,19 +94,28 @@ type ToolDefinition struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"input_schema"`
-	Function    func(input json.RawMessage) (string, error)
+	Function    func(ctx context.Context, input json.RawMessage) (string, error)
 }
 
 // New creates a new Agent instance
 func New(client *genai.Client, model string, tools []ToolDefinition) *Agent {
+	return NewWithConfig(client, model, tools, DefaultAgentConfig())
+}
+
+// NewWithConfig creates a new Agent instance with custom configuration
+func NewWithConfig(client *genai.Client, model string, tools []ToolDefinition, config *AgentConfig) *Agent {
 	agent := &Agent{
 		client: client,
 		Model:  model,
 		tools:  tools,
+		config: config,
 	}
 
 	// Pre-compute function declarations for efficiency
-	agent.precomputeFunctionDeclarations()
+	if err := agent.precomputeFunctionDeclarations(); err != nil {
+		// Log error but don't fail - tools will be unavailable
+		fmt.Printf("Warning: Failed to initialize function declarations: %v\n", err)
+	}
 
 	return agent
 }
@@ -89,12 +127,12 @@ func (a *Agent) precomputeFunctionDeclarations() error {
 		// Convert map[string]interface{} to genai.Schema
 		schemaBytes, err := json.Marshal(tool.InputSchema)
 		if err != nil {
-			return fmt.Errorf("failed to marshal schema for tool %s: %v", tool.Name, err)
+			return fmt.Errorf("failed to marshal schema for tool %s: %w", tool.Name, err)
 		}
 
 		var schema genai.Schema
 		if err := json.Unmarshal(schemaBytes, &schema); err != nil {
-			return fmt.Errorf("failed to unmarshal schema for tool %s: %v", tool.Name, err)
+			return fmt.Errorf("failed to unmarshal schema for tool %s: %w", tool.Name, err)
 		}
 
 		functions = append(functions, &genai.FunctionDeclaration{
@@ -108,8 +146,68 @@ func (a *Agent) precomputeFunctionDeclarations() error {
 	return nil
 }
 
+// Helper function to create pointers
+func ptr[T any](v T) *T {
+	return &v
+}
+
+// isThinkingSupported checks if the current model supports thinking mode
+func (a *Agent) isThinkingSupported() bool {
+	if a.Model == "" {
+		return false
+	}
+	
+	for _, model := range a.config.SupportedThinkingModels {
+		if strings.Contains(a.Model, model) {
+			return true
+		}
+	}
+	return false
+}
+
+// runInferenceStream runs the model inference and handles streaming
+func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Content, enableThinking bool) iter.Seq2[*genai.GenerateContentResponse, error] {
+	// Determine thinking config if applicable
+	var thinkingConfig *genai.ThinkingConfig
+	if enableThinking && a.isThinkingSupported() {
+		thinkingConfig = &genai.ThinkingConfig{
+			IncludeThoughts: true,  // Use direct bool value
+			ThinkingBudget:  ptr(a.config.ThinkingBudget),
+		}
+	}
+
+	config := &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{
+			{
+				FunctionDeclarations: a.functions,
+			},
+		},
+		MaxOutputTokens:   a.config.MaxOutputTokens,
+		Temperature:       ptr(a.config.Temperature),
+		TopK:              ptr(a.config.TopK),
+		TopP:              ptr(a.config.TopP),
+		SystemInstruction: &genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{
+				{Text: config.SystemPrompt},
+			},
+		},
+		ThinkingConfig:    thinkingConfig,
+	}
+
+	return a.client.Models.GenerateContentStream(ctx, a.Model, conversation, config)
+}
+
 // ProcessMessage handles a single user message and streams the agent's response
-func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback, thoughtCallback ThoughtMessageCallback, confirmationCallback ToolConfirmationCallback) ([]Message, error) {
+func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback, thoughtCallback ThoughtMessageCallback, confirmationCallback ToolConfirmationCallback, enableThinking bool) ([]Message, error) {
+	// Ensure we have a deadline on the context
+	if _, ok := ctx.Deadline(); !ok {
+		// Set a reasonable timeout if none exists
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+	}
+
 	messages := []Message{}
 	userMessageContent := &genai.Content{
 		Role: "user",
@@ -120,13 +218,18 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 	a.Conversation = append(a.Conversation, userMessageContent)
 
 	for {
+		// Check context before proceeding
+		if err := ctx.Err(); err != nil {
+			return messages, fmt.Errorf("context cancelled: %w", err)
+		}
+
 		// Count input tokens and update internal tracking
 		if inputTokens, err := a.countTokens(ctx, a.Conversation); err == nil {
 			a.TokenUsage.InputTokens += inputTokens
 			a.TokenUsage.TotalTokens += inputTokens
 		}
 
-		streamResponse := a.runInferenceStream(ctx, a.Conversation)
+		streamResponse := a.runInferenceStream(ctx, a.Conversation, enableThinking)
 
 		var accumulatedText string
 		var accumulatedParts []*genai.Part
@@ -136,7 +239,7 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 		// Process streaming response
 		for chunk, err := range streamResponse {
 			if err != nil {
-				return nil, fmt.Errorf("streaming error: %w", err)
+				return messages, fmt.Errorf("streaming error: %w", err)
 			}
 
 			if len(chunk.Candidates) == 0 {
@@ -144,6 +247,26 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 			}
 
 			candidate := chunk.Candidates[0]
+			
+			// Check for finish reason
+			if candidate.FinishReason != "" && candidate.FinishReason != "STOP" {
+				// Handle specific finish reasons
+				switch candidate.FinishReason {
+				case "MAX_TOKENS":
+					messages = append(messages, Message{
+						Type:    AgentMessage,
+						Content: "\n\n[Response truncated due to length limit]",
+						IsError: true,
+					})
+				case "SAFETY":
+					messages = append(messages, Message{
+						Type:    AgentMessage,
+						Content: "\n\n[Response blocked by safety filters]",
+						IsError: true,
+					})
+				}
+			}
+
 			accumulatedParts = append(accumulatedParts, candidate.Content.Parts...)
 
 			// Process each part in the chunk
@@ -159,7 +282,10 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 
 					// Send thought message immediately via callback
 					if thoughtCallback != nil {
-						thoughtCallback(thoughtMsg)
+						if err := thoughtCallback(thoughtMsg); err != nil {
+							// Log but don't fail on callback errors
+							fmt.Printf("Warning: thought callback error: %v\n", err)
+						}
 					}
 					continue // Don't process this as regular text
 				}
@@ -207,11 +333,22 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 						}
 
 						// Execute tool and create message
-						result, isError := a.executeTool(part.FunctionCall.Name, part.FunctionCall.Args)
-
+						result, err := a.executeTool(ctx, part.FunctionCall.Name, part.FunctionCall.Args)
+						
 						argsJSON, _ := json.Marshal(part.FunctionCall.Args)
-						toolCallInfo := fmt.Sprintf("🔧 Tool Call: %s\nArguments: %s\nResult: %s",
-							part.FunctionCall.Name, string(argsJSON), result)
+						var toolCallInfo string
+						var isError bool
+						
+						if err != nil {
+							toolCallInfo = fmt.Sprintf("🔧 Tool Call: %s\nArguments: %s\nError: %v",
+								part.FunctionCall.Name, string(argsJSON), err)
+							isError = true
+							result = fmt.Sprintf("Error: %v", err)
+						} else {
+							toolCallInfo = fmt.Sprintf("🔧 Tool Call: %s\nArguments: %s\nResult: %s",
+								part.FunctionCall.Name, string(argsJSON), result)
+							isError = false
+						}
 
 						toolMsg := Message{
 							Type:    ToolMessage,
@@ -249,7 +386,8 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 
 					if textCallback != nil {
 						if err := textCallback(part.Text); err != nil {
-							return messages, fmt.Errorf("streaming callback error: %w", err)
+							// Log but don't fail on callback errors
+							fmt.Printf("Warning: text callback error: %v\n", err)
 						}
 					}
 				}
@@ -288,35 +426,6 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 	}
 }
 
-// runInferenceStream handles the AI inference with streaming and tool support
-func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Content) iter.Seq2[*genai.GenerateContentResponse, error] {
-	thinkingConfig := &genai.ThinkingConfig{}
-
-	if strings.Contains(a.Model, "gemini-2.5") {
-		thinkingBudgetVal := int32(-1)
-		thinkingConfig = &genai.ThinkingConfig{
-			ThinkingBudget:  &thinkingBudgetVal,
-			IncludeThoughts: true,
-		}
-	} else {
-		thinkingConfig = nil
-	}
-
-	// if model is gemini-2.5 family, then enable thinking, otherwise disable it
-	config := &genai.GenerateContentConfig{
-		Tools: []*genai.Tool{
-			{
-				FunctionDeclarations: a.functions,
-			},
-		},
-		MaxOutputTokens:   1024,
-		SystemInstruction: genai.NewContentFromText(config.SystemPrompt, genai.RoleUser),
-		ThinkingConfig:    thinkingConfig,
-	}
-
-	return a.client.Models.GenerateContentStream(ctx, a.Model, conversation, config)
-}
-
 // countTokens counts the tokens in the given conversation
 func (a *Agent) countTokens(ctx context.Context, conversation []*genai.Content) (int, error) {
 	config := &genai.CountTokensConfig{}
@@ -330,7 +439,7 @@ func (a *Agent) countTokens(ctx context.Context, conversation []*genai.Content) 
 }
 
 // executeTool executes a specific tool by name with given arguments
-func (a *Agent) executeTool(name string, args map[string]interface{}) (string, bool) {
+func (a *Agent) executeTool(ctx context.Context, name string, args map[string]interface{}) (string, error) {
 	var toolDef ToolDefinition
 	var found bool
 
@@ -342,22 +451,22 @@ func (a *Agent) executeTool(name string, args map[string]interface{}) (string, b
 		}
 	}
 	if !found {
-		return fmt.Sprintf("Tool %s not found", name), true
+		return "", fmt.Errorf("tool %s not found", name)
 	}
 
 	// Convert args to JSON
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
-		return fmt.Sprintf("Error marshaling arguments: %v", err), true
+		return "", fmt.Errorf("failed to marshal arguments: %w", err)
 	}
 
-	result, err := toolDef.Function(argsJSON)
+	// Execute with context
+	result, err := toolDef.Function(ctx, argsJSON)
 	if err != nil {
-		result = fmt.Sprintf("Error executing tool %s: %v", name, err)
-		return result, true
+		return "", fmt.Errorf("tool execution failed: %w", err)
 	}
 
-	return result, false
+	return result, nil
 }
 
 // GetTokenUsage returns the current token usage statistics
@@ -368,4 +477,20 @@ func (a *Agent) GetTokenUsage() TokenUsage {
 // ResetTokenUsage resets the token usage counters
 func (a *Agent) ResetTokenUsage() {
 	a.TokenUsage = TokenUsage{}
+}
+
+// ClearConversation clears the conversation history
+func (a *Agent) ClearConversation() {
+	a.Conversation = nil
+	a.ResetTokenUsage()
+}
+
+// GetConfig returns the agent configuration
+func (a *Agent) GetConfig() *AgentConfig {
+	return a.config
+}
+
+// UpdateConfig updates the agent configuration
+func (a *Agent) UpdateConfig(config *AgentConfig) {
+	a.config = config
 }

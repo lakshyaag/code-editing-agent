@@ -10,6 +10,7 @@ import (
 var SystemPrompt string
 
 // WelcomeMessage is the initial greeting shown to users
-const WelcomeMessage = `Welcome to the CLI Code Assistant! Type your request below or press F2 to select a different model. 
+const WelcomeMessage = `Type your request below or use:
+• F2: Select model  • F3: Toggle tool confirm  • F4: Toggle thinking mode
 
-System prompt loaded: %d characters`
+System prompt loaded (%d chars)`
