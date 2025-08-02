@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -62,6 +63,9 @@ type StreamState struct {
 	streamingMsg            *message
 	streamingMsgIndex       int
 	streamingWasInterrupted bool
+	
+	// Context management
+	cancelFunc context.CancelFunc
 	
 	// Channels
 	streamChunkChan    chan streamChunkMsg
@@ -287,7 +291,20 @@ func (m *model) handleKeyPress(msg tea.KeyMsg) tea.Cmd {
 
 	// Handle normal mode keys
 	switch msg.Type {
-	case tea.KeyCtrlC, tea.KeyEsc:
+	case tea.KeyCtrlC:
+		// Cancel any ongoing streaming
+		if m.stream.cancelFunc != nil {
+			m.stream.cancelFunc()
+		}
+		return tea.Quit
+	case tea.KeyEsc:
+		// If streaming, cancel it; otherwise quit
+		if m.ui.showSpinner && m.stream.cancelFunc != nil {
+			m.stream.cancelFunc()
+			m.ui.showSpinner = false
+			m.ui.textarea.Focus()
+			return nil
+		}
 		return tea.Quit
 	case tea.KeyF2:
 		return m.toggleModelSelection()
@@ -481,10 +498,18 @@ func (m *model) selectModel() tea.Cmd {
 
 // handleStreamStart handles the start of streaming
 func (m *model) handleStreamStart(msg streamStartMsg) tea.Cmd {
+	// Cancel any existing streaming operation
+	if m.stream.cancelFunc != nil {
+		m.stream.cancelFunc()
+	}
+	
+	// Create a new context with cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	m.stream.cancelFunc = cancel
+	
 	// Start the real-time streaming process
 	go func() {
-		// Create context for this streaming session
-		ctx := context.Background()
+		defer cancel() // Ensure cleanup
 		
 		// Message queue to handle ordering
 		messageQueue := make([]interface{}, 0)
@@ -531,21 +556,36 @@ func (m *model) handleStreamStart(msg streamStartMsg) tea.Cmd {
 		response, err := m.config.agent.ProcessMessage(ctx, msg.userInput,
 			// Text callback for streaming chunks
 			func(chunk string) error {
-				queueMessage(streamChunkMsg(chunk))
-				sendQueuedMessages()
-				return nil
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					queueMessage(streamChunkMsg(chunk))
+					sendQueuedMessages()
+					return nil
+				}
 			},
 			// Tool callback for immediate tool message display
 			func(toolMsg agent.Message) error {
-				queueMessage(toolMessageMsg(toolMsg))
-				sendQueuedMessages()
-				return nil
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					queueMessage(toolMessageMsg(toolMsg))
+					sendQueuedMessages()
+					return nil
+				}
 			},
 			// Thought callback for immediate thought message display
 			func(thoughtMsg agent.Message) error {
-				queueMessage(thoughtMessageMsg(thoughtMsg))
-				sendQueuedMessages()
-				return nil
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					queueMessage(thoughtMessageMsg(thoughtMsg))
+					sendQueuedMessages()
+					return nil
+				}
 			},
 			// Tool confirmation callback
 			func(toolName string, args map[string]interface{}) (bool, error) {
@@ -581,10 +621,18 @@ func (m *model) handleStreamStart(msg streamStartMsg) tea.Cmd {
 			m.config.enableThinkingMode) // Pass thinking mode preference
 
 		if err != nil {
-			m.stream.streamCompleteChan <- streamCompleteMsg{
-				finalMessages: []agent.Message{
-					{Type: agent.AgentMessage, Content: fmt.Sprintf("Error: %v", err), IsError: true},
-				},
+			// Check if it was a cancellation
+			if errors.Is(err, context.Canceled) {
+				// User cancelled, don't show error
+				m.stream.streamCompleteChan <- streamCompleteMsg{
+					finalMessages: []agent.Message{},
+				}
+			} else {
+				m.stream.streamCompleteChan <- streamCompleteMsg{
+					finalMessages: []agent.Message{
+						{Type: agent.AgentMessage, Content: fmt.Sprintf("Error: %v", err), IsError: true},
+					},
+				}
 			}
 			return
 		}

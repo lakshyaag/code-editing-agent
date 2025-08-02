@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -29,7 +30,7 @@ Use the 'append' parameter to control the behavior. By default, it overwrites.
 }
 
 // WriteFile writes content to a file, with options to overwrite or append.
-func WriteFile(input json.RawMessage) (string, error) {
+func WriteFile(ctx context.Context, input json.RawMessage) (string, error) {
 	var writeFileInput WriteFileInput
 	err := json.Unmarshal(input, &writeFileInput)
 	if err != nil {

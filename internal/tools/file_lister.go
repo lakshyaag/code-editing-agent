@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -39,7 +40,7 @@ var ListFilesDefinition = agent.ToolDefinition{
 }
 
 // ListFiles lists files and directories as a tree
-func ListFiles(input json.RawMessage) (string, error) {
+func ListFiles(ctx context.Context, input json.RawMessage) (string, error) {
 	var listFilesInput ListFilesInput
 	err := json.Unmarshal(input, &listFilesInput)
 	if err != nil {
