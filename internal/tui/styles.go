@@ -178,8 +178,6 @@ func getMessageIcon(mType messageType) string {
 		return toolIcon
 	case thoughtMessage:
 		return thoughtIcon
-	case welcomeMessage:
-		return "🎉"
 	default:
 		return bulletIcon
 	}

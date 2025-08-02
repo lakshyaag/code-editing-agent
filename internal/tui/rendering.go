@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"agent/internal/config"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -13,6 +14,15 @@ func (m *model) renderConversation() string {
 	m.ui.clickableLines = make(map[int]int)
 	var lines []string
 	var currentLine int
+
+	// Add welcome header if no messages yet
+	if len(m.messages) == 0 {
+		welcomeHeader := m.renderWelcomeHeader()
+		lines = append(lines, welcomeHeader)
+		currentLine += lipgloss.Height(welcomeHeader)
+		lines = append(lines, "") // Add spacing
+		currentLine++
+	}
 
 	// Add some top padding
 	lines = append(lines, "")
@@ -29,8 +39,6 @@ func (m *model) renderConversation() string {
 			renderedBlock = m.renderToolMessage(msg, i, &currentLine)
 		case thoughtMessage:
 			renderedBlock = m.renderThoughtMessage(msg, i, &currentLine)
-		case welcomeMessage:
-			renderedBlock = m.renderWelcomeMessage(msg)
 		}
 		lines = append(lines, renderedBlock)
 		currentLine += lipgloss.Height(renderedBlock)
@@ -231,6 +239,60 @@ func (m *model) renderThoughtMessage(msg message, index int, currentLine *int) s
 		Render(fullContent)
 }
 
+// renderWelcomeHeader renders the welcome message as a header
+func (m *model) renderWelcomeHeader() string {
+	// Create header with welcome icon and title
+	header := lipgloss.NewStyle().
+		Foreground(accentColor).
+		Bold(true).
+		Render("🎉 Welcome to CLI Code Assistant")
+
+	// Format the welcome message
+	welcomeContent := fmt.Sprintf(config.WelcomeMessage, len(config.SystemPrompt))
+	
+	// Split content into lines for better control
+	lines := strings.Split(welcomeContent, "\n")
+	var styledLines []string
+
+	// Style each line separately
+	contentStyle := lipgloss.NewStyle().
+		Foreground(textSecondary)
+
+	for _, line := range lines {
+		if line != "" {
+			styledLines = append(styledLines, contentStyle.Render(line))
+		} else {
+			styledLines = append(styledLines, "") // Preserve empty lines
+		}
+	}
+
+	// Join the styled content
+	styledContent := strings.Join(styledLines, "\n")
+
+	// Combine header and content with proper spacing
+	messageContent := lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		"", // Add a blank line for spacing
+		styledContent,
+	)
+
+	// Apply special welcome card styling
+	welcomeCardStyle := messageCardStyle.Copy().
+		BorderForeground(accentColor).
+		BorderStyle(lipgloss.DoubleBorder())
+
+	// Calculate proper width
+	cardWidth := m.ui.viewport.Width - 4
+	if cardWidth < 40 {
+		cardWidth = 40 // Ensure minimum width
+	}
+
+	return welcomeCardStyle.
+		Width(cardWidth).
+		Render(messageContent)
+}
+
 // statusBarView renders the status bar with modern styling
 func (m *model) statusBarView() string {
 	if !m.ui.showStatusBar {
@@ -322,55 +384,4 @@ func (m *model) statusBarView() string {
 	return statusBarStyle.
 		Width(m.ui.width).
 		Render(fullStatus)
-}
-
-// renderWelcomeMessage renders the welcome message with a special header
-func (m *model) renderWelcomeMessage(msg message) string {
-	// Create header with welcome icon and title
-	header := lipgloss.NewStyle().
-		Foreground(accentColor).
-		Bold(true).
-		Render("🎉 Welcome to CLI Code Assistant")
-
-	// Split content into lines for better control
-	lines := strings.Split(msg.content, "\n")
-	var styledLines []string
-
-	// Style each line separately
-	contentStyle := lipgloss.NewStyle().
-		Foreground(textSecondary)
-
-	for _, line := range lines {
-		if line != "" {
-			styledLines = append(styledLines, contentStyle.Render(line))
-		} else {
-			styledLines = append(styledLines, "") // Preserve empty lines
-		}
-	}
-
-	// Join the styled content
-	styledContent := strings.Join(styledLines, "\n")
-
-	// Combine header and content with proper spacing
-	messageContent := lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		"", // Add a blank line for spacing
-		styledContent,
-	)
-
-	// Apply special welcome card styling
-	welcomeCardStyle := messageCardStyle.Copy().
-		BorderForeground(accentColor).
-		BorderStyle(lipgloss.DoubleBorder())
-
-	// Calculate proper width
-	cardWidth := m.ui.viewport.Width - 4
-	if cardWidth < 40 {
-		cardWidth = 40 // Ensure minimum width
-	}
-
-	return welcomeCardStyle.
-		Width(cardWidth).
-		Render(messageContent)
 }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"agent/internal/agent"
 	"agent/internal/config"
@@ -35,7 +37,6 @@ const (
 	toolMessage
 	streamChunk
 	thoughtMessage
-	welcomeMessage
 )
 
 // UIState groups UI-related state
@@ -176,9 +177,7 @@ func InitialModel(agent *agent.Agent) *model {
 			requireToolConfirmation: requireConfirmation,
 			enableThinkingMode:      enableThinking,
 		},
-		messages: []message{
-			{mType: welcomeMessage, content: fmt.Sprintf(config.WelcomeMessage, len(config.SystemPrompt))},
-		},
+		messages: []message{}, // Start with empty messages
 	}
 
 	// Set initial content
@@ -486,33 +485,66 @@ func (m *model) handleStreamStart(msg streamStartMsg) tea.Cmd {
 	go func() {
 		// Create context for this streaming session
 		ctx := context.Background()
+		
+		// Message queue to handle ordering
+		messageQueue := make([]interface{}, 0)
+		queueMutex := &sync.Mutex{}
+		
+		// Helper to safely queue messages
+		queueMessage := func(msg interface{}) {
+			queueMutex.Lock()
+			messageQueue = append(messageQueue, msg)
+			queueMutex.Unlock()
+		}
+		
+		// Helper to send queued messages
+		sendQueuedMessages := func() {
+			queueMutex.Lock()
+			defer queueMutex.Unlock()
+			
+			for _, qMsg := range messageQueue {
+				switch msg := qMsg.(type) {
+				case streamChunkMsg:
+					select {
+					case m.stream.streamChunkChan <- msg:
+					case <-ctx.Done():
+						return
+					}
+				case toolMessageMsg:
+					select {
+					case m.stream.toolMessageChan <- msg:
+					case <-ctx.Done():
+						return
+					}
+				case thoughtMessageMsg:
+					select {
+					case m.stream.thoughtMessageChan <- msg:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+			messageQueue = messageQueue[:0] // Clear queue
+		}
+		
 		// Call the agent's ProcessMessage for streaming with tool callback
 		response, err := m.config.agent.ProcessMessage(ctx, msg.userInput,
 			// Text callback for streaming chunks
 			func(chunk string) error {
-				select {
-				case m.stream.streamChunkChan <- streamChunkMsg(chunk):
-				default:
-					// Channel full, skip chunk to avoid blocking
-				}
+				queueMessage(streamChunkMsg(chunk))
+				sendQueuedMessages()
 				return nil
 			},
 			// Tool callback for immediate tool message display
 			func(toolMsg agent.Message) error {
-				select {
-				case m.stream.toolMessageChan <- toolMessageMsg(toolMsg):
-				default:
-					// Channel full, skip to avoid blocking
-				}
+				queueMessage(toolMessageMsg(toolMsg))
+				sendQueuedMessages()
 				return nil
 			},
 			// Thought callback for immediate thought message display
 			func(thoughtMsg agent.Message) error {
-				select {
-				case m.stream.thoughtMessageChan <- thoughtMessageMsg(thoughtMsg):
-				default:
-					// Channel full, skip to avoid blocking
-				}
+				queueMessage(thoughtMessageMsg(thoughtMsg))
+				sendQueuedMessages()
 				return nil
 			},
 			// Tool confirmation callback
@@ -522,22 +554,28 @@ func (m *model) handleStreamStart(msg streamStartMsg) tea.Cmd {
 					return true, nil
 				}
 
-				// Create a response channel
+				// Create a response channel with timeout
 				responseChan := make(chan bool, 1)
+				timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
 
 				// Send confirmation request to the UI
-				m.stream.toolConfirmationChan <- toolConfirmationRequestMsg{
+				select {
+				case m.stream.toolConfirmationChan <- toolConfirmationRequestMsg{
 					toolName: toolName,
 					args:     args,
 					response: responseChan,
+				}:
+				case <-timeoutCtx.Done():
+					return false, fmt.Errorf("timeout waiting to send confirmation request")
 				}
 
-				// Wait for user response
+				// Wait for user response with timeout
 				select {
 				case confirmed := <-responseChan:
 					return confirmed, nil
-				case <-ctx.Done():
-					return false, ctx.Err()
+				case <-timeoutCtx.Done():
+					return false, fmt.Errorf("timeout waiting for user confirmation")
 				}
 			},
 			m.config.enableThinkingMode) // Pass thinking mode preference
@@ -567,7 +605,7 @@ func (m *model) handleStreamStart(msg streamStartMsg) tea.Cmd {
 
 // handleToolMessage handles incoming tool messages
 func (m *model) handleToolMessage(msg toolMessageMsg) tea.Cmd {
-	// Handle tool message immediately
+	// Defer expensive rendering to avoid blocking the event loop
 	newToolMsg := message{
 		mType:       toolMessage,
 		content:     msg.Content,
@@ -591,11 +629,16 @@ func (m *model) handleToolMessage(msg toolMessageMsg) tea.Cmd {
 		m.messages = append(m.messages, newToolMsg)
 	}
 
-	m.ui.viewport.SetContent(m.renderConversation())
-	m.ui.viewport.GotoBottom()
-
-	// Continue listening for tool messages
-	return waitForToolMessage(m.stream.toolMessageChan)
+	// Batch UI updates by deferring the expensive rendering
+	return tea.Batch(
+		func() tea.Msg {
+			// This runs outside the event loop
+			m.ui.viewport.SetContent(m.renderConversation())
+			m.ui.viewport.GotoBottom()
+			return nil
+		},
+		waitForToolMessage(m.stream.toolMessageChan),
+	)
 }
 
 // handleThoughtMessage handles incoming thought messages
@@ -624,11 +667,15 @@ func (m *model) handleThoughtMessage(msg thoughtMessageMsg) tea.Cmd {
 		m.messages = append(m.messages, newThoughtMsg)
 	}
 
-	m.ui.viewport.SetContent(m.renderConversation())
-	m.ui.viewport.GotoBottom()
-
-	// Continue listening for thought messages
-	return waitForThoughtMessage(m.stream.thoughtMessageChan)
+	// Batch UI updates
+	return tea.Batch(
+		func() tea.Msg {
+			m.ui.viewport.SetContent(m.renderConversation())
+			m.ui.viewport.GotoBottom()
+			return nil
+		},
+		waitForThoughtMessage(m.stream.thoughtMessageChan),
+	)
 }
 
 // handleStreamChunk handles incoming stream chunks
@@ -652,11 +699,18 @@ func (m *model) handleStreamChunk(msg streamChunkMsg) tea.Cmd {
 		if m.stream.streamingMsgIndex < len(m.messages) {
 			m.messages[m.stream.streamingMsgIndex] = *m.stream.streamingMsg
 		}
-		m.ui.viewport.SetContent(m.renderConversation())
-		m.ui.viewport.GotoBottom()
 	}
-	// Continue listening for more chunks
-	return waitForStreamChunk(m.stream.streamChunkChan)
+	
+	// Batch frequent updates to avoid overwhelming the renderer
+	// This helps keep the event loop fast for streaming content
+	return tea.Batch(
+		tea.Tick(time.Millisecond*50, func(t time.Time) tea.Msg {
+			m.ui.viewport.SetContent(m.renderConversation())
+			m.ui.viewport.GotoBottom()
+			return nil
+		}),
+		waitForStreamChunk(m.stream.streamChunkChan),
+	)
 }
 
 // handleStreamComplete handles stream completion
