@@ -11,6 +11,7 @@ import (
 type UserPreferences struct {
 	SelectedModel           string `json:"selected_model,omitempty"`
 	RequireToolConfirmation bool   `json:"require_tool_confirmation"`
+	EnableThinkingMode      bool   `json:"enable_thinking_mode"`
 }
 
 // GetPreferencesPath returns the path to the preferences file
@@ -34,7 +35,8 @@ func LoadPreferences() (*UserPreferences, error) {
 	// If file doesn't exist, return default preferences
 	if _, err := os.Stat(prefsPath); os.IsNotExist(err) {
 		return &UserPreferences{
-			RequireToolConfirmation: true, // Default to true for safety
+			RequireToolConfirmation: true,  // Default to true for safety
+			EnableThinkingMode:      false, // Default to false
 		}, nil
 	}
 
@@ -49,7 +51,7 @@ func LoadPreferences() (*UserPreferences, error) {
 	}
 
 	// Set default values for fields that weren't in the config
-	if prefs.RequireToolConfirmation == false && prefs.SelectedModel == "" {
+	if prefs.RequireToolConfirmation == false && prefs.SelectedModel == "" && !prefs.EnableThinkingMode {
 		// If the config file exists but doesn't have this field, default to true
 		prefs.RequireToolConfirmation = true
 	}

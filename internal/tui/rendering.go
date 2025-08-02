@@ -10,7 +10,7 @@ import (
 
 // renderConversation renders all messages in the conversation with modern styling
 func (m *model) renderConversation() string {
-	m.clickableLines = make(map[int]int)
+	m.ui.clickableLines = make(map[int]int)
 	var lines []string
 	var currentLine int
 
@@ -52,7 +52,7 @@ func (m *model) renderUserMessage(msg message) string {
 
 	// Render markdown content
 	var content string
-	renderedMarkdown, err := m.markdownRenderer.Render(msg.content)
+	renderedMarkdown, err := m.config.markdownRenderer.Render(msg.content)
 	if err != nil {
 		content = msg.content
 	} else {
@@ -62,7 +62,7 @@ func (m *model) renderUserMessage(msg message) string {
 	// Apply text color styling to content
 	styledContent := lipgloss.NewStyle().
 		Foreground(textSecondary).
-		Width(m.viewport.Width - 10). // Account for card padding and borders
+		Width(m.ui.viewport.Width - 10). // Account for card padding and borders
 		Render(content)
 
 	// Combine header and content
@@ -74,7 +74,7 @@ func (m *model) renderUserMessage(msg message) string {
 
 	// Apply card styling
 	return userMessageStyle.
-		Width(m.viewport.Width - 4). // Account for viewport margins
+		Width(m.ui.viewport.Width - 4). // Account for viewport margins
 		Render(messageContent)
 }
 
@@ -94,7 +94,7 @@ func (m *model) renderAgentMessage(msg message) string {
 
 	// Render markdown content
 	var content string
-	renderedMarkdown, err := m.markdownRenderer.Render(msg.content)
+	renderedMarkdown, err := m.config.markdownRenderer.Render(msg.content)
 	if err != nil {
 		content = msg.content
 	} else {
@@ -104,7 +104,7 @@ func (m *model) renderAgentMessage(msg message) string {
 	// Apply text color styling to content
 	styledContent := lipgloss.NewStyle().
 		Foreground(textSecondary).
-		Width(m.viewport.Width - 10). // Account for card padding and borders
+		Width(m.ui.viewport.Width - 10). // Account for card padding and borders
 		Render(content)
 
 	// Combine header and content
@@ -116,7 +116,7 @@ func (m *model) renderAgentMessage(msg message) string {
 
 	// Apply card styling
 	return agentMessageStyle.
-		Width(m.viewport.Width - 4). // Account for viewport margins
+		Width(m.ui.viewport.Width - 4). // Account for viewport margins
 		Render(messageContent)
 }
 
@@ -144,22 +144,22 @@ func (m *model) renderToolMessage(msg message, index int, currentLine *int) stri
 	}
 
 	header := headerStyleToUse.
-		Width(m.viewport.Width - 6). // Account for borders
+		Width(m.ui.viewport.Width - 6). // Account for borders
 		Render(headerContent)
 
 	// Make header clickable
-	m.clickableLines[*currentLine] = index
+	m.ui.clickableLines[*currentLine] = index
 
 	if msg.isCollapsed {
 		// Return just the header in a card
 		return toolMessageStyle.
-			Width(m.viewport.Width - 4).
+			Width(m.ui.viewport.Width - 4).
 			Render(header)
 	}
 
 	// Format and render the expanded content
 	formattedContent := formatToolContent(msg.content)
-	renderedContent, err := m.markdownRenderer.Render(formattedContent)
+	renderedContent, err := m.config.markdownRenderer.Render(formattedContent)
 	if err != nil {
 		renderedContent = msg.content
 	} else {
@@ -168,7 +168,7 @@ func (m *model) renderToolMessage(msg message, index int, currentLine *int) stri
 
 	// Style the content
 	styledContent := toolContentStyle.
-		Width(m.viewport.Width - 10).
+		Width(m.ui.viewport.Width - 10).
 		Render(renderedContent)
 
 	// Combine header and content
@@ -180,7 +180,7 @@ func (m *model) renderToolMessage(msg message, index int, currentLine *int) stri
 
 	// Apply card styling
 	return toolMessageStyle.
-		Width(m.viewport.Width - 4).
+		Width(m.ui.viewport.Width - 4).
 		Render(fullContent)
 }
 
@@ -191,22 +191,22 @@ func (m *model) renderThoughtMessage(msg message, index int, currentLine *int) s
 	headerContent := fmt.Sprintf("%s %s Thinking...", expandIcon, thoughtIcon)
 
 	header := thoughtHeaderStyle.
-		Width(m.viewport.Width - 6). // Account for borders
+		Width(m.ui.viewport.Width - 6). // Account for borders
 		Render(headerContent)
 
 	// Make header clickable
-	m.clickableLines[*currentLine] = index
+	m.ui.clickableLines[*currentLine] = index
 
 	if msg.isCollapsed {
 		// Return just the header in a card
 		return thoughtMessageStyle.
-			Width(m.viewport.Width - 4).
+			Width(m.ui.viewport.Width - 4).
 			Render(header)
 	}
 
 	// Extract and render the thought content
 	content := strings.TrimPrefix(msg.content, "💭 Thinking: ")
-	renderedContent, err := m.markdownRenderer.Render(content)
+	renderedContent, err := m.config.markdownRenderer.Render(content)
 	if err != nil {
 		renderedContent = content
 	} else {
@@ -215,7 +215,7 @@ func (m *model) renderThoughtMessage(msg message, index int, currentLine *int) s
 
 	// Style the content
 	styledContent := thoughtContentStyle.
-		Width(m.viewport.Width - 10).
+		Width(m.ui.viewport.Width - 10).
 		Render(renderedContent)
 
 	// Combine header and content
@@ -227,13 +227,13 @@ func (m *model) renderThoughtMessage(msg message, index int, currentLine *int) s
 
 	// Apply card styling
 	return thoughtMessageStyle.
-		Width(m.viewport.Width - 4).
+		Width(m.ui.viewport.Width - 4).
 		Render(fullContent)
 }
 
 // statusBarView renders the status bar with modern styling
 func (m *model) statusBarView() string {
-	if !m.showStatusBar {
+	if !m.ui.showStatusBar {
 		return ""
 	}
 
@@ -250,11 +250,11 @@ func (m *model) statusBarView() string {
 	}
 
 	// Build status items with icons
-	modelInfo := statusItemStyle.Render(fmt.Sprintf("🔮 %s", m.agent.Model))
+	modelInfo := statusItemStyle.Render(fmt.Sprintf("🔮 %s", m.config.agent.Model))
 	cwdInfo := statusItemStyle.Render(fmt.Sprintf("📁 %s", cwd))
 
 	// Token usage with color coding and description
-	tokenUsage := m.agent.GetTokenUsage()
+	tokenUsage := m.config.agent.GetTokenUsage()
 	tokenStyle := statusItemStyle.Copy()
 	tokenDescription := "Tokens"
 
@@ -272,26 +272,33 @@ func (m *model) statusBarView() string {
 
 	// Add help text
 	confirmStatus := ""
-	if m.requireToolConfirmation {
+	if m.config.requireToolConfirmation {
 		confirmStatus = " (Confirm: ON)"
 	} else {
 		confirmStatus = " (Confirm: OFF)"
 	}
 
+	thinkingStatus := ""
+	if m.config.enableThinkingMode {
+		thinkingStatus = " (Think: ON)"
+	} else {
+		thinkingStatus = " (Think: OFF)"
+	}
+
 	var helpInfo string
-	if m.toolConfirmationMode {
+	if m.ui.toolConfirmationMode {
 		helpInfo = lipgloss.NewStyle().
 			Foreground(warningColor).
 			Bold(true).
 			Render("Y: Confirm | N/Esc: Deny")
-	} else if m.modelSelectionMode {
+	} else if m.ui.modelSelectionMode {
 		helpInfo = lipgloss.NewStyle().
 			Foreground(primaryColor).
 			Render("↑↓ Navigate • Enter Select • Esc Cancel")
 	} else {
 		helpInfo = lipgloss.NewStyle().
 			Foreground(textMuted).
-			Render(fmt.Sprintf("F2 Model • F3 Tool Confirm%s • Ctrl+T Toggle • Ctrl+C Exit", confirmStatus))
+			Render(fmt.Sprintf("F2 Model • F3 Confirm%s • F4 Think%s • Ctrl+T Toggle • Ctrl+C Exit", confirmStatus, thinkingStatus))
 	}
 
 	// Combine all status items
@@ -307,13 +314,13 @@ func (m *model) statusBarView() string {
 		lipgloss.Top,
 		leftStatus,
 		lipgloss.NewStyle().
-			Width(m.width-lipgloss.Width(leftStatus)-lipgloss.Width(helpInfo)-4).
+			Width(m.ui.width-lipgloss.Width(leftStatus)-lipgloss.Width(helpInfo)-4).
 			Render(" "),
 		helpInfo,
 	)
 
 	return statusBarStyle.
-		Width(m.width).
+		Width(m.ui.width).
 		Render(fullStatus)
 }
 
@@ -358,7 +365,7 @@ func (m *model) renderWelcomeMessage(msg message) string {
 		BorderStyle(lipgloss.DoubleBorder())
 
 	// Calculate proper width
-	cardWidth := m.viewport.Width - 4
+	cardWidth := m.ui.viewport.Width - 4
 	if cardWidth < 40 {
 		cardWidth = 40 // Ensure minimum width
 	}

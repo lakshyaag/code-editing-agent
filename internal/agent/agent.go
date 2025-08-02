@@ -109,7 +109,7 @@ func (a *Agent) precomputeFunctionDeclarations() error {
 }
 
 // ProcessMessage handles a single user message and streams the agent's response
-func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback, thoughtCallback ThoughtMessageCallback, confirmationCallback ToolConfirmationCallback) ([]Message, error) {
+func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallback StreamingCallback, toolCallback ToolMessageCallback, thoughtCallback ThoughtMessageCallback, confirmationCallback ToolConfirmationCallback, enableThinking bool) ([]Message, error) {
 	messages := []Message{}
 	userMessageContent := &genai.Content{
 		Role: "user",
@@ -126,7 +126,7 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 			a.TokenUsage.TotalTokens += inputTokens
 		}
 
-		streamResponse := a.runInferenceStream(ctx, a.Conversation)
+		streamResponse := a.runInferenceStream(ctx, a.Conversation, enableThinking)
 
 		var accumulatedText string
 		var accumulatedParts []*genai.Part
@@ -289,10 +289,10 @@ func (a *Agent) ProcessMessage(ctx context.Context, userInput string, textCallba
 }
 
 // runInferenceStream handles the AI inference with streaming and tool support
-func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Content) iter.Seq2[*genai.GenerateContentResponse, error] {
-	thinkingConfig := &genai.ThinkingConfig{}
+func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Content, enableThinking bool) iter.Seq2[*genai.GenerateContentResponse, error] {
+	var thinkingConfig *genai.ThinkingConfig
 
-	if strings.Contains(a.Model, "gemini-2.5") {
+	if strings.Contains(a.Model, "gemini-2.5") && enableThinking {
 		thinkingBudgetVal := int32(-1)
 		thinkingConfig = &genai.ThinkingConfig{
 			ThinkingBudget:  &thinkingBudgetVal,
@@ -302,7 +302,7 @@ func (a *Agent) runInferenceStream(ctx context.Context, conversation []*genai.Co
 		thinkingConfig = nil
 	}
 
-	// if model is gemini-2.5 family, then enable thinking, otherwise disable it
+	// if model is gemini-2.5 family, then enable thinking if requested, otherwise disable it
 	config := &genai.GenerateContentConfig{
 		Tools: []*genai.Tool{
 			{
