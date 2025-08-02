@@ -2,11 +2,9 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -841,7 +839,7 @@ func (m *model) renderMainView() string {
 	if m.ui.showSpinner {
 		// Create a centered spinner with modern styling
 		spinner := m.ui.spinner.View() + " Processing your request..."
-		taView = textInputContainerStyle.
+		taView = textInputStyle.
 			Width(m.ui.width - 4).
 			Render(
 				lipgloss.NewStyle().
@@ -851,7 +849,7 @@ func (m *model) renderMainView() string {
 			)
 	} else {
 		// Style the textarea with the modern container
-		taView = textInputContainerStyle.
+		taView = textInputStyle.
 			Width(m.ui.width - 4).
 			Render(m.ui.textarea.View())
 	}
@@ -939,203 +937,4 @@ type toolConfirmationRequestMsg struct {
 // New message types for real-time streaming
 type streamStartMsg struct {
 	userInput string
-}
-
-// renderModelSelector renders the model selection overlay with modern styling
-func (m *model) renderModelSelector(background string) string {
-	// Create title with icon
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(primaryColor).
-		MarginBottom(2).
-		Render("🔮 Select AI Model")
-
-	// Build the model list
-	var modelItems []string
-	for i, modelName := range m.config.availableModels {
-		var itemStyle lipgloss.Style
-		var prefix string
-
-		// Check if this is the current model
-		if modelName == m.config.agent.Model {
-			prefix = "• "
-		} else {
-			prefix = "  "
-		}
-
-		// Apply selection styling
-		if i == m.ui.selectedModelIndex {
-			itemStyle = modelItemSelectedStyle
-		} else {
-			itemStyle = modelItemStyle
-		}
-
-		// Format model name with capabilities hint
-		modelDisplay := modelName
-		if strings.Contains(modelName, "pro") {
-			modelDisplay += " (Advanced)"
-		} else if strings.Contains(modelName, "flash-lite") {
-			modelDisplay += " (Fast & Light)"
-		} else if strings.Contains(modelName, "flash") {
-			modelDisplay += " (Fast)"
-		}
-
-		modelItems = append(modelItems, itemStyle.Render(prefix+modelDisplay))
-	}
-
-	modelList := lipgloss.JoinVertical(lipgloss.Left, modelItems...)
-
-	// Add navigation help
-	navHelp := lipgloss.NewStyle().
-		Foreground(textMuted).
-		MarginTop(2).
-		Align(lipgloss.Center).
-		Render("↑/↓ Navigate • Enter Select • Esc Cancel")
-
-	// Combine all elements
-	content := lipgloss.JoinVertical(
-		lipgloss.Center,
-		title,
-		modelList,
-		navHelp,
-	)
-
-	// Apply the modern selector styling
-	selectorBox := modelSelectorStyle.
-		Width(50). // Fixed width for consistency
-		Render(content)
-
-	// Position the selector in the center
-	return lipgloss.Place(
-		m.ui.width, m.ui.height,
-		lipgloss.Center, lipgloss.Center,
-		selectorBox,
-	)
-}
-
-// renderToolConfirmation renders the tool confirmation overlay
-func (m *model) renderToolConfirmation(background string) string {
-	// Create the confirmation box with modern styling
-	confirmStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(warningColor).
-		Padding(2, 3).
-		Background(bgMedium)
-
-	// Title with warning icon
-	titleStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(warningColor).
-		Align(lipgloss.Center).
-		MarginBottom(2)
-
-	title := titleStyle.Render("⚠️  Tool Execution Request")
-
-	// Tool name section
-	toolNameStyle := lipgloss.NewStyle().
-		Foreground(primaryColor).
-		Bold(true).
-		MarginBottom(1)
-
-	toolNameSection := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		lipgloss.NewStyle().Foreground(textMuted).Render("Tool: "),
-		toolNameStyle.Render(m.ui.toolConfirmationName),
-	)
-
-	// Arguments section with syntax highlighting
-	argsHeaderStyle := lipgloss.NewStyle().
-		Foreground(textMuted).
-		MarginTop(1).
-		MarginBottom(1)
-
-	argsHeader := argsHeaderStyle.Render("Arguments:")
-
-	// Format arguments with proper indentation and coloring
-	argsJSON, _ := json.MarshalIndent(m.ui.toolConfirmationArgs, "", "  ")
-	argsStyle := lipgloss.NewStyle().
-		Foreground(secondaryColor).
-		Background(bgDark).
-		Padding(1).
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(bgLighter)
-
-	argsContent := argsStyle.Render(string(argsJSON))
-
-	// Question section
-	questionStyle := lipgloss.NewStyle().
-		Foreground(textPrimary).
-		Bold(true).
-		MarginTop(2).
-		MarginBottom(2).
-		Align(lipgloss.Center)
-
-	question := questionStyle.Render("Do you want to execute this tool?")
-
-	// Action buttons visualization
-	buttonStyle := lipgloss.NewStyle().
-		Padding(0, 2).
-		MarginRight(2)
-
-	yesButton := buttonStyle.Copy().
-		Background(accentColor).
-		Foreground(bgDark).
-		Bold(true).
-		Render("Y - Yes")
-
-	noButton := buttonStyle.Copy().
-		Background(errorColor).
-		Foreground(textPrimary).
-		Bold(true).
-		Render("N - No")
-
-	escButton := buttonStyle.Copy().
-		Background(bgLighter).
-		Foreground(textPrimary).
-		Render("Esc - Cancel")
-
-	buttons := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		yesButton,
-		noButton,
-		escButton,
-	)
-
-	buttonsContainer := lipgloss.NewStyle().
-		Align(lipgloss.Center).
-		Width(50). // Fixed width for centering
-		Render(buttons)
-
-	// Security note
-	securityNote := lipgloss.NewStyle().
-		Foreground(textMuted).
-		Italic(true).
-		MarginTop(2).
-		Align(lipgloss.Center).
-		Render("🔒 Tool execution requires your permission")
-
-	// Combine all elements
-	content := lipgloss.JoinVertical(
-		lipgloss.Center,
-		title,
-		toolNameSection,
-		argsHeader,
-		argsContent,
-		question,
-		buttonsContainer,
-		securityNote,
-	)
-
-	// Apply confirmation box styling
-	confirmBox := confirmStyle.
-		Width(60). // Fixed width for consistency
-		Render(content)
-
-	// Create semi-transparent overlay effect
-	return lipgloss.Place(
-		m.ui.width, m.ui.height,
-		lipgloss.Center, lipgloss.Center,
-		confirmBox,
-		lipgloss.WithWhitespaceBackground(bgDark),
-	)
 }
