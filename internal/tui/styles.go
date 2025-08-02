@@ -4,19 +4,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Core colors - reduced palette
+// Core colors - improved visibility
 var (
-	primaryColor   = lipgloss.Color("14") // Bright Cyan
-	secondaryColor = lipgloss.Color("12") // Bright Blue
-	accentColor    = lipgloss.Color("10") // Bright Green
-	errorColor     = lipgloss.Color("9")  // Bright Red
-	warningColor   = lipgloss.Color("11") // Bright Yellow
+	primaryColor   = lipgloss.Color("87")  // Light Cyan (more visible)
+	secondaryColor = lipgloss.Color("75")  // Light Blue (more visible)
+	accentColor    = lipgloss.Color("120") // Light Green (more visible)
+	errorColor     = lipgloss.Color("203") // Light Red/Pink (softer)
+	warningColor   = lipgloss.Color("221") // Light Yellow/Orange
 	
-	bgDark     = lipgloss.Color("235") // Dark gray
-	bgLight    = lipgloss.Color("241") // Light gray
+	bgDark     = lipgloss.Color("236") // Slightly lighter dark gray
+	bgLight    = lipgloss.Color("244") // Medium gray (more visible)
 	
-	textPrimary = lipgloss.Color("15") // Bright White
-	textMuted   = lipgloss.Color("8")  // Gray
+	textPrimary = lipgloss.Color("15")  // Bright White
+	textMuted   = lipgloss.Color("250") // Light gray (much more visible than 8)
 )
 
 // Base styles

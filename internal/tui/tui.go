@@ -182,17 +182,17 @@ func InitialModel(agent *agent.Agent) *model {
 		messages: []message{}, // Start with empty messages
 	}
 
-	// Set initial content
-	m.ui.viewport.SetContent(m.renderConversation())
+	// Don't set initial content - wait for window size
+	// m.ui.viewport.SetContent(m.renderConversation())
 
 	return m
 }
 
 func (m *model) Init() tea.Cmd {
 	return tea.Batch(
+		tea.WindowSize(), // Request initial window size first
 		textarea.Blink,
 		m.ui.spinner.Tick,
-		tea.WindowSize(), // Request initial window size
 	)
 }
 

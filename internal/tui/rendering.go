@@ -12,6 +12,11 @@ import (
 
 // renderConversation renders all messages in the conversation
 func (m *model) renderConversation() string {
+	// Ensure we have a valid viewport width
+	if m.ui.viewport.Width <= 0 {
+		return "" // Don't render until we have window dimensions
+	}
+
 	m.ui.clickableLines = make(map[int]int)
 	var lines []string
 	var currentLine int
@@ -173,21 +178,33 @@ func (m *model) renderMarkdown(content string) string {
 
 // renderWelcomeHeader renders the welcome message header
 func (m *model) renderWelcomeHeader() string {
+	// Ensure minimum width
+	width := m.ui.viewport.Width - 4
+	if width < 60 {
+		width = 60
+	}
+
 	header := lipgloss.NewStyle().
 		Foreground(accentColor).
 		Bold(true).
 		Render("🎉 Welcome to CLI Code Assistant")
 
 	welcomeContent := fmt.Sprintf(config.WelcomeMessage, len(config.SystemPrompt))
-	content := lipgloss.NewStyle().
+	
+	// Apply word wrapping to content before rendering
+	contentStyle := lipgloss.NewStyle().
 		Foreground(textMuted).
+		Width(width - 6). // Account for card padding
 		Render(welcomeContent)
+
+	// Combine with newlines for proper spacing
+	fullContent := header + "\n\n" + contentStyle
 
 	return cardStyle.Copy().
 		BorderForeground(accentColor).
 		BorderStyle(lipgloss.DoubleBorder()).
-		Width(m.ui.viewport.Width - 4).
-		Render(header + "\n\n" + content)
+		Width(width).
+		Render(fullContent)
 }
 
 // statusBarView renders the status bar
